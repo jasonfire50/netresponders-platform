@@ -1,0 +1,488 @@
+body { padding: 15px; font-family: Arial, sans-serif; }
+      .par-tag {
+          font-size: 0.7rem;
+          font-weight: bold;
+          padding: 2px 6px;
+          border-radius: 4px;
+
+          /* --- CHANGES ARE HERE --- */
+          border: 2px solid white; /* Increased from 1px to 2px */
+          text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.5); /* Added for contrast */
+          /* --- END OF CHANGES --- */
+
+          color: white;
+          background-color: #6c757d; /* Grey default */
+          cursor: pointer;
+          opacity: 0.8;
+          transition: background-color 0.3s, opacity 0.3s;
+      }
+      .par-tag:hover {
+          opacity: 1;
+      }
+      .par-tag-active {
+          background-color: #28a745; /* Green */
+      }
+      .par-tag-expired {
+          background-color: #dc3545; /* Ensures it starts red */
+          animation: flash-red 1.5s infinite; /* The magic happens here */
+      }
+      /* Defines the flashing animation */
+      @keyframes flash-red {
+        0%, 100% {
+          background-color: #dc3545; /* Red */
+          box-shadow: 0 0 8px rgba(220, 53, 69, 0.7); /* Red glow */
+          transform: scale(1);
+        }
+        50% {
+          background-color: #a71d2a; /* A darker red */
+          box-shadow: 0 0 16px rgba(220, 53, 69, 1); /* Brighter glow */
+          transform: scale(1.05); /* Slightly pulse */
+        }
+      }
+
+      /* Applies the animation to the expired tag */
+      .par-tag-expired {
+          background-color: #dc3545; /* Ensures it starts red */
+          animation: flash-red 1.5s infinite; /* The magic happens here */
+      }
+
+      .sidebar {
+        transition: margin-left 0.35s ease-in-out, width 0.35s ease-in-out;
+        overflow-x: hidden;
+        background-color: #f8f9fa; padding: 15px; border-radius: 5px; margin-bottom:20px;
+        height: calc(100vh - 30px); /* Adjust 30px if body padding changes */
+        overflow-y: auto; /* Allow sidebar content to scroll if it's too tall */
+      }
+      #commandSidebar.sidebar-collapsed {
+        margin-left: -33.333333%; /* For col-md-4, or use fixed pixels */
+        width: 0 !important; /* Collapse width effectively */
+        padding: 0 !important;
+        border: 0 !important;
+      }
+      .main-content {
+        padding: 15px; border-radius: 5px;
+        transition: width 0.35s ease-in-out, max-width 0.35s ease-in-out, flex-basis 0.35s ease-in-out;
+      }
+      #commandSidebar.sidebar-collapsed + #commandMainContent {
+        width: 100% !important; max-width: 100% !important; flex-basis: 100% !important; flex-grow: 1;
+      }
+      #current-incident-summary { font-size: 0.9em; } /* For compact incident display */
+      .list-group-item { cursor: default; }
+      .loader { border: 5px solid #f3f3f3; border-top: 5px solid #3498db; border-radius: 50%; width: 30px; height: 30px; animation: spin 1s linear infinite; display: none; margin: 10px auto; }
+      @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+      #groupsContainer .card { min-height: 200px; } /* Min height for group cards */
+      #groupsContainer .card-header { font-size: 0.9rem; padding: 0.5rem 0.75rem;}
+      #groupsContainer .card-title { font-size: 1.1rem; }
+      .child-groups-container .card {
+        margin-top: 5px !important;
+        margin-bottom: 5px !important;
+        /* border: 1px solid #aed6f1; /* Example: light blue border for children */
+        /* box-shadow: none; /* Remove shadow from child cards if desired */
+      }
+
+      .child-groups-container {
+        /* background-color: #f8f9fa; /* Slightly different background for the child area */
+        padding: 5px;
+        /* border-top: 1px dashed #ccc; */ /* Separator line */
+      }
+
+      .child-groups-container > .card { /* Target cards that are direct children of the container */
+        margin-left: 20px !important;   /* <<< KEY: Indentation */
+        width: calc(100% - 20px);     /* Adjust width to account for indentation */
+        margin-top: 8px !important;     /* Spacing between child cards and from container top */
+        margin-bottom: 8px !important;
+
+        /* Option A: Subtle visual difference for the whole child card */
+        /* border: 1px dashed #adb5bd; /* Example: dashed border */
+        /* box-shadow: none !important; /* Example: remove shadow to make them less prominent */
+
+        /* Option B: Keep child cards looking mostly like parent cards, rely on indentation and "Reports to:" */
+        /* No major style changes here, they inherit default .card styles mostly */
+      }
+
+      /* Optional: If child card titles or benchmark buttons need to be smaller */
+      /*.child-groups-container > .card .card-title {
+         font-size: 1rem; /* Example: Slightly smaller title
+      }
+      .child-groups-container > .card .btn-group-sm .btn {
+           font-size: 0.7rem;  /* Example: Smaller benchmark buttons
+      }
+      */
+
+      .click-to-assign-active #groupsContainer .card:hover {
+          cursor: copy; /* A great visual indicator for assignment */
+          border: 2px solid #007bff;
+          box-shadow: 0 0 10px rgba(0,123,255,.5);
+      }
+
+      .click-to-move-active #groupsContainer .card:hover {
+          cursor: copy;
+          border: 2px solid #ffc107; /* A yellow/warning color for moving */
+          box-shadow: 0 0 10px rgba(255,193,7,.5);
+      }
+
+      .unit-in-group { font-size: 0.9em; padding: 0.5rem 0.75rem; border-bottom: 1px solid #eee; }
+      .unit-in-group:last-child { border-bottom: none; }
+      .unit-in-group small { color: #6c757d; }
+      .unit-in-group .btn-group { white-space: nowrap; }
+      .unit-in-group .btn-group .btn { font-size: 0.8em; padding-top: 0.1rem !important; padding-bottom: 0.1rem !important; line-height: 1.2 !important; margin-left: 2px; }
+      .unit-in-group .btn-group .btn:first-child { margin-left: 0; }
+      .available-unit { display: flex; align-items: center; }
+      .available-unit label { margin-left: 0.5rem; flex-grow: 1; }
+      .available-unit input[type="checkbox"] { flex-shrink: 0; }
+      .moving-unit-banner { background-color: #fff3cd; color: #856404; padding: 5px 10px; border-radius: 4px; margin-bottom: 10px; border: 1px solid #ffeeba; text-align: center; }
+      .view { display: none; } .view.active { display: block; }
+      #reportOutputArea table { font-size: 0.9em; }
+      #reportOutputArea th, #reportOutputArea td { padding: 0.25rem 0.5rem; white-space: nowrap; }
+      .supervisor-yes { font-weight: bold; color: #ffc107; }
+      .btn-group .btn.active { background-color: #007bff; color: white; } /* For nav buttons */
+      .dragging { opacity: 0.4; border: 2px dashed #007bff; }
+      .drag-over-target { background-color: #e9f5ff !important; border: 2px dashed #007bff !important; box-shadow: 0 0 10px rgba(0,123,255,.5); }
+      .group-units-list.drag-over-target > p.no-units-assigned { color: #007bff; } /* For D&D on card body */
+      div.card.drag-over-target { background-color: #e9f5ff !important; border: 2px dashed #007bff !important; } /* For D&D on card */
+      .modal-body .form-control[readonly] { background-color: #e9ecef; }
+      #availableUnitsAccordionContainer .card-header button { text-decoration: none; color: #212529; }
+      #availableUnitsAccordionContainer .card-header button:hover { background-color: #f0f0f0; }
+      #availableUnitsAccordionContainer .card-header button .badge { font-size: 0.8em;}
+      #sidebarToggleBtn { font-size: 1.2rem; line-height: 1; padding: 0.25rem 0.5rem;}
+      #incident-control-accordion .card-header button {font-size: 0.9rem; font-weight: bold;}
+      #incident-control-accordion .card-body {font-size: 0.9rem;}
+      .group-units-outer-body .card-header /* If you use card-header for the unit toggle */ {
+          cursor: pointer;
+          background-color: #f8f9fa; /* Light background for the unit toggle header */
+          border-bottom: 1px solid #e0e0e0;
+      }
+      .group-units-outer-body .card-header:hover {
+          background-color: #e9ecef;
+      }
+      .group-units-outer-body .expand-icon {
+          font-size: 0.8em;
+          transition: transform 0.2s ease-in-out;
+      }
+      .group-drag-handle {
+          cursor: grab;
+          font-size: 1.2rem;
+          padding: 0 5px;
+          opacity: 0.6;
+      }
+      .group-drag-handle:hover {
+          opacity: 1;
+      }
+      #groupsContainer > .col-md-3.dragging-group {
+          opacity: 0.4;
+      }
+      .group-reorder-placeholder {
+          background-color: #e9ecef;
+          border: 2px dashed #6c757d;
+          min-height: 200px;
+          border-radius: .25rem;
+          flex-shrink: 0;
+      }
+      .assign-parent-active #groupsContainer .card:hover {
+          cursor: pointer;
+          border: 2px solid #17a2b8; /* Info color */
+          box-shadow: 0 0 10px rgba(23,162,184,.5);
+      }
+      #templateGroupsList .list-group-item {
+          cursor: grab; /* Indicates items are draggable */
+          user-select: none; /* Prevents text selection while dragging */
+      }
+      #templateGroupsList .list-group-item.dragging {
+          opacity: 0.5;
+          background-color: #d1ecf1; /* A light blue to show what's being dragged */
+      }
+
+      /* --- View Switching Styles --- */
+      .view {
+        display: none; /* Hide all views by default */
+      }
+
+      .view.active {
+        display: block; /* Show only the active view */
+      }
+
+      /* Style for when the app is in unit assignment mode */
+      .assignment-mode-active #groupsContainer .card {
+          cursor: copy; /* A great visual indicator for assignment */
+          border: 2px solid #007bff;
+          box-shadow: 0 0 10px rgba(0,123,255,.5);
+          transition: all 0.2s ease-in-out;
+      }
+      .assignment-mode-active #groupsContainer .card:hover {
+          transform: scale(1.02);
+      }
+
+      /* Style for when the app is in unit move mode */
+      .move-mode-active #groupsContainer .card {
+          cursor: pointer;
+          border: 2px solid #ffc107; /* A yellow/warning color */
+          box-shadow: 0 0 10px rgba(255,193,7,.5);
+      }
+      .move-mode-active #groupsContainer .card:hover {
+          transform: scale(1.02);
+      }
+      .actions-hidden {
+          display: none !important;
+      }
+
+/* --- Sidebar Toggle Styles (Corrected) --- */
+#commandSidebar, #commandMainContent {
+  transition: all 0.35s ease-in-out;
+}
+
+/* This class is now toggled on the parent .row element */
+.sidebar-hidden #commandSidebar {
+    display: none; /* Removes the element completely from the layout */
+}
+
+.sidebar-hidden #commandMainContent {
+    flex: 0 0 100%; /* Overrides the default col-md-8 */
+    max-width: 100%;
+}
+
+/* This class is now toggled on the BODY element */
+body.sidebar-collapsed #commandSidebar {
+  width: 0 !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  border: 0 !important;
+}
+
+body.sidebar-collapsed #commandMainContent {
+  flex: 0 0 100%;
+  max-width: 100%;
+}
+
+/* --- PAR Timer Button Styles --- */
+.par-btn {
+    font-size: 0.8rem;
+    font-weight: bold;
+    padding: 2px 8px;
+    border-radius: 4px;
+    border: 2px solid white; /* Required outline for visibility */
+    text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.5); /* Contrast for text */
+    color: white;
+    cursor: pointer;
+    transition: background-color 0.3s, opacity 0.3s;
+}
+
+.par-btn:hover {
+    opacity: 1;
+}
+
+.par-btn-idle {
+    background-color: #6c757d; /* Grey */
+    opacity: 0.8;
+}
+
+.par-btn-active {
+    background-color: #28a745; /* Green */
+}
+
+.par-btn-expired {
+    animation: flash-red-white 1.5s infinite;
+}
+
+/* Defines the flashing animation */
+@keyframes flash-red-white {
+  0%, 100% {
+    background-color: #dc3545; /* Red */
+    box-shadow: 0 0 8px rgba(220, 53, 69, 0.7);
+    transform: scale(1);
+  }
+  50% {
+    background-color: #ffffff; /* White */
+    color: #dc3545; /* Red text */
+    text-shadow: none;
+    box-shadow: 0 0 16px rgba(255, 255, 255, 1);
+    transform: scale(1.05);
+  }
+}
+
+/* --- Contextual Unit Actions Styles --- */
+
+/* Hide the single-unit action icons by default */
+.single-unit-actions {
+    visibility: hidden;
+    opacity: 0;
+    transition: visibility 0s, opacity 0.2s linear;
+}
+
+/* When a unit's row gets the 'unit-selected' class, show its icons */
+.unit-in-group.unit-selected .single-unit-actions {
+    visibility: visible;
+    opacity: 1;
+}
+
+/* When the card enters multi-select mode, hide the individual action icons */
+.multi-select-active .single-unit-actions {
+    visibility: hidden !important;
+}
+
+/* --- Group Reorder Mode Styles --- */
+
+/* This class is added to the #groupsContainer when mode is active */
+.reorder-mode-active .group-card {
+    cursor: pointer;
+    border: 2px dashed #007bff; /* Blue dashed border on all cards */
+    box-shadow: 0 0 10px rgba(0,123,255,.3);
+}
+
+/* This class is added to the one card selected for the move */
+.reorder-mode-active .group-selected-for-move {
+    border: 3px solid #0056b3 !important; /* Stronger solid blue border */
+    box-shadow: 0 0 15px rgba(0, 86, 179, .7) !important;
+    transform: scale(1.02);
+}
+
+/* --- Group Hierarchy Styles (Definitive Final Version) --- */
+
+/* The wrapper gets the colored border and provides the container.
+   It has NO PADDING itself, which is the key to fixing the width bug. */
+.parent-group-wrapper.has-children {
+    border-width: 2px !important;
+    border-style: solid !important;
+    border-radius: .25rem;
+    background-color: #f8f9fa; /* Light grey background for the whole block */
+    height: 100%; /* Ensures the wrapper fills the column height */
+    padding: 0;
+}
+
+/* We style the PARENT card inside the wrapper to look like a fused header.
+   The negative margin makes it "break out" of the padding of the
+   elements below it, touching the wrapper's border. */
+.parent-group-wrapper.has-children > .card {
+    margin-bottom: 0;
+    border-radius: 0;
+    border: 1px solid #dee2e6; /* Give it a standard border */
+    border-top: none;
+    border-left: none;
+    border-right: none;
+}
+
+/* The child container provides the indentation and internal spacing. */
+.child-groups-container {
+    padding: 15px 15px 5px 40px; /* Top, Right, Bottom, Left */
+}
+
+/* Each individual child card gets its own border. */
+.child-groups-container .card {
+    border: 1px solid #dee2e6;
+    margin-bottom: 10px;
+}
+
+/* The "Reports to" bar is inside the CHILD header. */
+.reports-to-bar {
+    font-size: 0.75em;
+    font-style: italic;
+    opacity: 0.9;
+    margin-top: 2px;
+    border-top: 1px solid rgba(255, 255, 255, 0.3);
+    padding-top: 4px;
+}
+
+.reports-to-bar .btn-clear-parent:hover {
+    opacity: 1;
+    background-color: white;
+    color: #dc3545;
+}
+
+/* Visual feedback for when "Assign Parent" mode is active. */
+.assign-parent-active #groupsContainer .group-card:hover {
+    cursor: pointer;
+    border: 2px solid #17a2b8 !important;
+    box-shadow: 0 0 10px rgba(23,162,184,.5) !important;
+}
+
+/* --- Styles for New Sortable Available Units Table --- */
+.available-units-table th.sortable-header {
+  cursor: pointer;
+  user-select: none; /* Prevents text selection on double click */
+}
+
+.available-units-table th.sortable-header:hover {
+  background-color: #e9ecef;
+}
+
+.sort-indicator {
+  display: inline-block;
+  width: 1em;
+  text-align: left;
+  color: #adb5bd; /* Light grey for unsorted */
+  transition: transform 0.2s ease-in-out, color 0.2s;
+}
+
+th.sortable-header:not(.sort-asc):not(.sort-desc) .sort-indicator::after {
+  content: ' \f0dc'; /* FontAwesome sort icon */
+  font-family: "Font Awesome 5 Free";
+  font-weight: 900;
+}
+
+th.sortable-header.sort-asc .sort-indicator::after {
+  content: ' \f0de'; /* FontAwesome sort-up icon */
+  font-family: "Font Awesome 5 Free";
+  font-weight: 900;
+}
+
+th.sortable-header.sort-desc .sort-indicator::after {
+  content: ' \f0dd'; /* FontAwesome sort-down icon */
+  font-family: "Font Awesome 5 Free";
+  font-weight: 900;
+}
+
+th.sortable-header.sort-asc .sort-indicator,
+th.sortable-header.sort-desc .sort-indicator {
+  color: #007bff; /* Blue for active sort column */
+}
+
+/* --- Styles for New Sortable Admin Units Table --- */
+.admin-units-table th.sortable-header-admin {
+  cursor: pointer;
+  user-select: none;
+}
+
+.admin-units-table th.sortable-header-admin:hover {
+  background-color: #e9ecef;
+}
+
+/* We can reuse the existing sort indicator styles */
+th.sortable-header-admin .sort-indicator::after {
+  font-family: "Font Awesome 5 Free";
+  font-weight: 900;
+}
+
+th.sortable-header-admin:not(.sort-asc):not(.sort-desc) .sort-indicator::after {
+  content: ' \f0dc'; /* sort */
+}
+
+th.sortable-header-admin.sort-asc .sort-indicator::after {
+  content: ' \f0de'; /* sort-up */
+}
+
+th.sortable-header-admin.sort-desc .sort-indicator::after {
+  content: ' \f0dd'; /* sort-down */
+}
+
+th.sortable-header-admin.sort-asc .sort-indicator,
+th.sortable-header-admin.sort-desc .sort-indicator {
+  color: #007bff;
+}
+
+/* --- Style for Disabled Multi-Action Buttons --- */
+
+/* Targets any button inside the multi-actions panel that is disabled */
+.multi-unit-actions button:disabled {
+  /*
+   * The !important flag is necessary here to forcefully override
+   * Bootstrap's highly specific styles for .btn-success and .btn-info.
+   */
+  background-color: #6c757d !important; /* A neutral, secondary grey */
+  border-color: #6c757d !important;     /* Match the border to the background */
+
+  /* A slight opacity is still good for the standard "disabled" look. */
+  opacity: 0.65;
+
+  /* These provide clear user feedback on hover. */
+  cursor: not-allowed;
+  pointer-events: none;
+}
