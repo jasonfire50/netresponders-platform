@@ -1,319 +1,357 @@
 /**
- * app.js
- * Version: 1.18.0
- * Changes in this version:
- * - Event listener now correctly handles all Station management buttons.
+ * app.js - FINAL DEFINITIVE STABLE VERSION
  */
-
-const APP_VERSION = "1.18.0";
+const APP_VERSION = "5.0.0-stable";
+let isInitializing = false;
+let activeIncidentsMasterListener = null;
 
 let appState = {
-  isAuthenticated: false,
-  launchId: null,
-  initialData: null,
-  departmentsWithAvailableUnits: [],
-  openAvailableUnitsPanels: new Set(),
-  currentIncident: null,
-  currentViewId: 'commandBoardView',
-  planLevel: 'Basic',
-  unitToMove: null,
-  selectedAvailableUnits: new Set(),
-  selectedGroupUnits: {},
-  unitsToMultiMove: null,
-  isMultiMoveActive: false,
-  isReorderModeActive: false,
-  groupToMove: null,
-  isAssignParentModeActive: false,
-  groupToAssignParent: null,
-  parTimerIntervals: {},
+  isAuthenticated: false, currentUser: null, idToken: null, initialData: null,
+  departmentsWithAvailableUnits: [], openAvailableUnitsPanels: new Set(),
+  currentIncident: null, currentViewId: 'commandBoardView', planLevel: 'Basic',
+  unitToMove: null, selectedAvailableUnits: new Set(), selectedGroupUnits: {},
+  unitsToMultiMove: null, isMultiMoveActive: false, isReorderModeActive: false,
+  groupToMove: null, isAssignParentModeActive: false, groupToAssignParent: null,
+  parTimerIntervals: {}, sessionId: null, sessionHeartbeatInterval: null,
+  isLockedOut: false, isViewOnly: false, isCommandRequestPending: false,
 };
 
-/**
- * A helper function to reset all unit selections within groups.
- * This is called after any action that modifies group assignments.
- */
-function clearGroupSelectionState() {
-  appState.selectedGroupUnits = {};
-}
+function clearGroupSelectionState() { appState.selectedGroupUnits = {}; }
+
+
+// ===================================================================
+//
+//  AUTHENTICATION AND INITIALIZATION
+//
+// ===================================================================
+
+document.addEventListener("DOMContentLoaded", () => {
+  const appContainer = document.getElementById('app-container');
+  const loader = document.getElementById('loader');
+  if (appContainer) appContainer.style.display = 'none';
+  if (loader) loader.style.display = 'block';
+  firebase.auth().onAuthStateChanged(user => {
+    if (user) {
+      if (isInitializing) return;
+      isInitializing = true;
+      if (appContainer) appContainer.style.display = 'block';
+      initializeApp(user);
+    } else {
+      isInitializing = false;
+      if (appState.sessionHeartbeatInterval) clearInterval(appState.sessionHeartbeatInterval);
+      Object.assign(appState, { sessionId: null, currentUser: null, idToken: null, isLockedOut: false, isViewOnly: false });
+      const currentPath = window.location.pathname;
+      if (!currentPath.includes('/login.html')) {
+        window.location.href = `/login.html?redirect=${currentPath}`;
+      }
+    }
+  });
+});
+
 
 /**
- * Main entry point, triggered by the 'defer' attribute in index.html
+ * Main application initializer - FINAL DEFINITIVE VERSION
+ * This version corrects the order of operations, ensuring that real-time
+ * listeners are ONLY attached AFTER all initial data has been successfully loaded.
  */
-document.addEventListener("DOMContentLoaded", initializeApp);
-
-/**
- * Initializes the application: gets data and renders the initial UI.
- * This version now stores the planLevel in the appState.
- */
-async function initializeApp() {
-  console.log(`NetResponders App Version: ${APP_VERSION} loading...`);
-  renderApp();
-  const authStatus = document.getElementById("auth-status");
-
-  showLoader();
+async function initializeApp(user) {
+  console.log(`App Version: ${APP_VERSION} loading...`);
+  const sessionId = sessionStorage.getItem('sessionId');
+  if (!sessionId) {
+    console.error("CRITICAL: No session ID found. Forcing logout.");
+    await firebase.auth().signOut();
+    return;
+  }
+  appState.isAuthenticated = true;
+  appState.currentUser = user;
+  appState.sessionId = sessionId;
   try {
-    const urlParams = new URLSearchParams(window.location.search);
-    appState.launchId = urlParams.get("id");
-    if (!appState.launchId) {
-      throw new Error("No Launch ID provided. Cannot authenticate.");
+    appState.idToken = await user.getIdToken(true);
+    const statusResponse = await callApi("checkSessionStatus", { sessionId: appState.sessionId }, 'POST');
+    if (!statusResponse.success) throw new Error(statusResponse.message);
+    if (statusResponse.data.status === 'locked_out') {
+      appState.isLockedOut = true;
+      document.getElementById('app-container').style.display = 'none';
+      const banner = document.getElementById('global-lockout-banner');
+      banner.textContent = statusResponse.data.message;
+      banner.style.display = 'block';
+      hideLoader();
+      return;
     }
-    const response = await callApi("getInitialData", {id: appState.launchId});
-    if (!response.success) {
-      throw new Error(response.message || "Failed to get initial data.");
-    }
-    appState.isAuthenticated = true;
-    appState.initialData = response.data;
-
-    // --- START: STORE THE PLAN LEVEL ---
-    appState.planLevel = response.data.planLevel || 'Basic';
-    console.log(`User plan level is: ${appState.planLevel}`);
-    // --- END: STORE THE PLAN LEVEL ---
-
-    authStatus.textContent = "Authenticated";
-    authStatus.className = "text-success font-weight-bold";
-
+    const initialDataResponse = await callApi("getInitialData");
+    if (!initialDataResponse.success) throw new Error(initialDataResponse.message);
+    appState.initialData = initialDataResponse.data;
+    appState.planLevel = initialDataResponse.data.planLevel || 'Basic';
+    renderApp();
     setupGlobalEventListeners();
+    manageHeartbeat();
+    attachActiveIncidentsListener();
+    const authStatus = document.getElementById("auth-status");
+    if (authStatus) authStatus.textContent = `Authenticated: ${user.email}`;
     showView("commandBoardView");
-
   } catch (error) {
-    console.error("Initialization Error:", error.message);
-    if (authStatus) {
-        authStatus.textContent = "Initialization Failed";
-        authStatus.className = "text-danger font-weight-bold";
-    }
-    showError(error.message);
+    console.error("CRITICAL INITIALIZATION FAILED:", error);
+    await firebase.auth().signOut();
+    const errorMessage = encodeURIComponent(error.message);
+    window.location.href = `/login.html?error=${errorMessage}`;
   } finally {
     hideLoader();
+    isInitializing = false;
   }
 }
 
 /**
- * Renders the application's static shell, now including the global header
- * with the new manual refresh button.
+ * Manages the session heartbeat and authentication token refresh.
+ * This function is tied to the browser's visibility state.
+ */
+async function manageHeartbeat() {
+  const user = firebase.auth().currentUser;
+  if (!user) return;
+  if (document.visibilityState === 'visible' && appState.sessionId) {
+    try {
+      appState.idToken = await user.getIdToken(true);
+    } catch (error) {
+      console.error("Failed to refresh auth token, logging out.", error);
+      await firebase.auth().signOut();
+      return;
+    }
+    if (!appState.sessionHeartbeatInterval) {
+      appState.sessionHeartbeatInterval = setInterval(() => {
+        if (appState.sessionId) {
+          callApi("sessionHeartbeat", {sessionId: appState.sessionId}, 'POST')
+            .catch(err => console.warn("Heartbeat failed:", err.message));
+        }
+      }, 60000);
+    }
+  } else {
+    if (appState.sessionHeartbeatInterval) {
+      clearInterval(appState.sessionHeartbeatInterval);
+      appState.sessionHeartbeatInterval = null;
+    }
+  }
+}
+
+
+/**
+ * Renders the application's static shell.
  */
 function renderApp() {
   const appContainer = document.getElementById("app-container");
   if (!appContainer) return;
+  const SUPER_ADMIN_UID = "WRikDrCVOqTbXHK11mteAD9Fr4t1";
+  const isSuperAdmin = appState.currentUser.uid === SUPER_ADMIN_UID;
+  const superAdminTabHtml = isSuperAdmin ? `<li class="nav-item"><a class="nav-link" data-view="superAdminView" href="#"><i class="fas fa-user-shield"></i> Super Admin</a></li>` : '';
   appContainer.innerHTML = `
     <div class="d-flex align-items-center mb-2">
-      <button id="sidebarToggleBtn" class="btn btn-sm btn-outline-secondary mr-2" title="Toggle Sidebar" style="display: none;">
-        ☰ <!-- Hamburger Icon -->
-      </button>
-
-      <!-- START: REFRESH BUTTON ADDED -->
-      <button id="manualRefreshBtn" class="btn btn-sm btn-outline-secondary mr-2" title="Refresh Timers and Data">
-        <i class="fas fa-sync-alt"></i> <!-- Refresh Icon -->
-      </button>
-      <!-- END: REFRESH BUTTON ADDED -->
-
+      <button id="sidebarToggleBtn" class="btn btn-sm btn-outline-secondary mr-2" title="Toggle Sidebar" style="display: none;">☰</button>
+      <button id="manualRefreshBtn" class="btn btn-sm btn-outline-secondary mr-2" title="Refresh Timers and Data"><i class="fas fa-sync-alt"></i></button>
       <h3 class="mb-0">Command Board</h3>
-      <div id="auth-status" class="ml-auto text-muted font-italic">Initializing...</div>
+      <div class="ml-auto d-flex align-items-center">
+        <div id="auth-status" class="text-muted font-italic mr-3">Initializing...</div>
+        <button id="logoutBtn" class="btn btn-sm btn-outline-secondary"><i class="fas fa-sign-out-alt"></i> Logout</button>
+      </div>
     </div>
     <ul class="nav nav-tabs mb-3" id="main-nav-tabs">
       <li class="nav-item"><a class="nav-link active" data-view="commandBoardView" href="#">Command Board</a></li>
       <li class="nav-item"><a class="nav-link" data-view="reportingView" href="#">Reporting</a></li>
       <li class="nav-item"><a class="nav-link" data-view="adminView" href="#">Admin</a></li>
+      ${superAdminTabHtml}
     </ul>
     <div id="view-container">
       <div id="commandBoardView" class="view"></div>
       <div id="reportingView" class="view"></div>
       <div id="adminView" class="view"></div>
+      ${isSuperAdmin ? '<div id="superAdminView" class="view"></div>' : ''}
     </div>`;
 }
 
 /**
+ * Handles the click of the "Logout" button.
+ * This version now correctly checks if the current user is the actual
+ * commander of the selected incident before showing the warning prompt.
+ */
+async function handleLogout() {
+  const isUserCommanding = appState.currentIncident && appState.currentIncident.commanderUid === appState.currentUser.uid;
+  if (isUserCommanding) {
+    if (!confirm("Warning: You are commanding an active incident. Logging out will NOT close the incident. Are you sure?")) return;
+  }
+  showLoader();
+  try {
+    sessionStorage.removeItem('sessionId');
+    clearAllIncidentListeners();
+    if (activeIncidentsMasterListener) activeIncidentsMasterListener();
+    if (appState.sessionHeartbeatInterval) clearInterval(appState.sessionHeartbeatInterval);
+    if (appState.sessionId) await callApi("endSession", { sessionId: appState.sessionId }, 'POST');
+    await firebase.auth().signOut();
+  } catch (error) {
+    console.error("Logout failed:", error);
+    showError("Failed to logout.");
+    await firebase.auth().signOut();
+  }
+}
+
+/**
  * Sets up all persistent, global event listeners for the application.
- * This function acts as the main "switchboard" for user interactions.
- * This final version correctly wires up all actions, including the PAR button.
+ * This definitive version uses a single, delegated listener for all clicks and
+ * a single listener for all changes, which is the most robust way to handle
+ * dynamically created elements. This is the single source of truth for all
+ * user interaction events.
  */
 function setupGlobalEventListeners() {
-  // Guard clause to prevent attaching listeners multiple times.
   const appContainer = document.getElementById("app-container");
   if (appContainer && appContainer.dataset.listenersAttached === 'true') return;
   if (appContainer) appContainer.dataset.listenersAttached = 'true';
 
-  // --- Main CLICK event listener for the entire document ---
+  document.addEventListener('visibilitychange', manageHeartbeat);
+
   document.addEventListener("click", (event) => {
     const target = event.target;
-    // Find the closest relevant element the user might have clicked on.
     const button = target.closest("button");
     const navLink = target.closest("#main-nav-tabs .nav-link");
-    const sortableHeader = target.closest('.sortable-header');
-
-    // Helper to fix a modal focus bug in Bootstrap.
-    const dismissButton = target.closest('[data-dismiss="modal"]');
-    if (dismissButton && document.activeElement) {
-      document.activeElement.blur();
-    }
-
-    if (sortableHeader) {
-      handleSortAvailableUnits(sortableHeader);
-      return;
-    }
-
-    if (button && button.id === 'sidebarToggleBtn') {
-        event.preventDefault();
-        const commandBoardRow = document.querySelector('#commandBoardView .row.flex-nowrap');
-        if (commandBoardRow) {
-            commandBoardRow.classList.toggle('sidebar-hidden');
-            const isHidden = commandBoardRow.classList.contains('sidebar-hidden');
-            button.title = isHidden ? "Show Panel" : "Hide Panel";
-        }
-        return;
-    }
 
     if (navLink) {
       event.preventDefault();
       showView(navLink.getAttribute("data-view"));
       return;
     }
+    if (!button) return;
 
-    // If a button was clicked, determine what action to take.
-    if (button) {
-      // THE FIX IS HERE: Added '.js-par-btn' to the list of selectors.
-      const buttonClassSelector = ".js-edit-dept, .js-delete-dept, .js-edit-type, .js-delete-type, .js-edit-unit, .js-delete-unit, .js-manage-stations, .js-delete-station, .js-edit-cgroup, .js-delete-cgroup, .js-edit-template, .js-delete-template, .js-multi-move, .js-multi-release, .js-multi-split, .js-move-unit, .js-release-unit, .js-set-supervisor, .js-clear-supervisor, .js-benchmark-btn, .js-assign-parent, .js-clear-parent, .js-disband-group, .js-unsplit-unit, .js-split-unit, .js-par-btn";
+    // Switch for all global and modal buttons
+    if (button.id) {
+      switch (button.id) {
+        // App Shell Buttons
+        case "logoutBtn": handleLogout(); break;
+        case "manualRefreshBtn": handleManualRefresh(); break;
 
-      if (button.matches(buttonClassSelector)) {
-        event.preventDefault();
-        const id = button.dataset.id;
-        const name = button.dataset.name;
+        // Command Board Modal Buttons
+        case "approveCommandRequestBtn": handleApproveCommandRequest(); break;
+        case "denyCommandRequestBtn": handleDenyCommandRequest(); break;
+        case "confirmUnsplitBtn": handleConfirmUnsplit(); break;
 
-        // This if/else chain calls the appropriate function.
-        if (button.matches(".js-edit-dept")) openDepartmentModal(id);
-        else if (button.matches(".js-delete-dept")) handleDeleteDepartmentClick(id, name);
-        else if (button.matches(".js-edit-type")) openUnitTypeModal(id);
-        else if (button.matches(".js-delete-type")) handleDeleteUnitTypeClick(id, name);
-        else if (button.matches(".js-edit-unit")) openUnitModal(id);
-        else if (button.matches(".js-delete-unit")) handleDeleteUnitClick(id, name);
-        else if (button.matches(".js-manage-stations")) openManageStationsModal(button.dataset.deptId, button.dataset.deptName);
-        else if (button.matches(".js-delete-station")) handleDeleteStation(button);
-        else if (button.matches(".js-edit-cgroup")) openCommonGroupModal(id);
-        else if (button.matches(".js-delete-cgroup")) handleDeleteCommonGroupClick(id, name);
-        else if (button.matches(".js-edit-template")) openTemplateModal(id);
-        else if (button.matches(".js-delete-template")) handleDeleteTemplateClick(id, name);
-        else if (button.matches(".js-multi-move")) handleMultiMoveClick(button);
-        else if (button.matches(".js-multi-split")) handleMultiSplitClick(button);
-        else if (button.matches(".js-multi-release")) handleMultiReleaseClick(button);
-        else if (button.matches(".js-move-unit")) handleMoveUnitClick(id, name);
-        else if (button.matches(".js-release-unit")) handleReleaseUnitClick(id, name);
-        else if (button.matches(".js-set-supervisor")) handleSetSupervisor(button.dataset.groupId, button.dataset.unitId);
-        else if (button.matches(".js-clear-supervisor")) handleClearSupervisor(button.dataset.groupId);
-        else if (button.matches(".js-benchmark-btn")) handleBenchmarkClick(button.dataset.groupId, button.dataset.benchmarkName, button.dataset.currentStatus);
-        else if (button.matches(".js-assign-parent")) handleAssignParentClick(button);
-        else if (button.matches(".js-clear-parent")) handleClearParentClick(button);
-        else if (button.matches(".js-disband-group")) handleDisbandGroupClick(button);
-        else if (button.matches(".js-unsplit-unit")) openUnsplitUnitModal(button);
-        else if (button.matches(".js-split-unit")) splitUnit(button);
-        // AND THE FIX IS HERE: Added a condition to call the PAR handler.
-        else if (button.matches(".js-par-btn")) handleParButtonClick(button);
-
-        return;
+        // Admin Modal "Save" Buttons
+        case "saveDepartmentBtn": handleSaveDepartment(); break;
+        case "saveUnitBtn": handleSaveUnit(); break;
+        case "saveUnitTypeBtn": handleSaveUnitType(); break;
+        case "saveCommonGroupBtn": handleSaveCommonGroup(); break;
+        case "saveTemplateBtn": handleSaveTemplate(); break;
       }
-
-      // Handles all buttons that use a specific ID for their action.
-      if (button.id) {
-        event.preventDefault();
-        switch (button.id) {
-          case "manualRefreshBtn": handleManualRefresh(); break;
-          case "reorderGroupsBtn": toggleReorderMode(); break;
-          case "cancelReorderBtn": toggleReorderMode(); break;
-          case "confirmUnsplitBtn": handleConfirmUnsplit(); break;
-          case "startNewIncidentBtn": handleStartNewIncident(); break;
-          case "closeIncidentBtn": handleCloseIncident(); break;
-          case "addGroupBtn": handleAddGroup(); break;
-          case "applyTemplateBtn": handleApplyTemplate(); break;
-          case "addDepartmentBtn": openDepartmentModal(); break;
-          case "saveDepartmentBtn": handleSaveDepartment(); break;
-          case "addUnitTypeBtn": openUnitTypeModal(); break;
-          case "saveUnitTypeBtn": handleSaveUnitType(); break;
-          case "addUnitBtn": openUnitModal(); break;
-          case "saveUnitBtn": handleSaveUnit(); break;
-          case "addCommonGroupBtn": openCommonGroupModal(); break;
-          case "saveCommonGroupBtn": handleSaveCommonGroup(); break;
-          case "addTemplateBtn": openTemplateModal(); break;
-          case "addTemplateGroupBtn": addGroupToTemplateModalList(); break;
-          case "saveTemplateBtn": handleSaveTemplate(); break;
-          case "saveSettingsBtn": handleSaveSettings(); break;
-          case "deleteIncidentBtn": handleDeleteIncidentClick(); break;
-          case "addNewStationBtn": handleAddNewStation(); break;
-        }
-      }
-    }
-  });
-
-  // --- Main CHANGE event listener for the entire document ---
-  document.addEventListener("change", (event) => {
-    if (event.target.id === "activeIncidentsSelect") {
-      handleActiveIncidentSelect();
-    }
-    if (event.target.id === "closedIncidentSelect") {
-      handleAdminIncidentSelect();
-    }
-    if (event.target.matches('.available-unit-checkbox')) {
-      handleAvailableUnitCheckboxChange(event.target);
     }
   });
 }
 
+
 /**
- * Main view router. Renders the content for the selected view and
- * now also updates the currentViewId in the appState.
- * @param {string} viewId The ID of the view to show.
+ * Main view router.
+ * This definitive version is "dumb" and reliable. It ALWAYS re-renders the
+ * view when a tab is clicked, ensuring a clean and correct state.
  */
 function showView(viewId) {
-  console.log(`Switching to view: ${viewId}`);
-  appState.currentViewId = viewId; // Keep track of the active view
+  appState.currentViewId = viewId;
 
-  document.querySelectorAll(".view").forEach((v) => v.classList.remove("active"));
-  document.querySelectorAll("#main-nav-tabs .nav-link").forEach((l) => l.classList.remove("active"));
+  // Hide all view containers.
+  document.querySelectorAll(".view").forEach((v) => {
+    v.style.display = "none";
+  });
+  // Update the active state on the navigation tabs.
+  document.querySelectorAll("#main-nav-tabs .nav-link").forEach((l) => {
+    l.classList.remove("active");
+  });
 
   const targetView = document.getElementById(viewId);
   const targetLink = document.querySelector(`.nav-link[data-view="${viewId}"]`);
-  if (targetView) targetView.classList.add("active");
-  if (targetLink) targetLink.classList.add("active");
-
-  const toggleBtn = document.getElementById('sidebarToggleBtn');
-  if (toggleBtn) {
-    toggleBtn.style.display = (viewId === 'commandBoardView') ? 'inline-block' : 'none';
+  if (targetView) {
+    targetView.style.display = "block";
+  }
+  if (targetLink) {
+    targetLink.classList.add("active");
   }
 
   const data = appState.initialData;
   if (!data) {
-    if (targetView) targetView.innerHTML = `<p class="text-muted">Loading data...</p>`;
+    if (targetView) {
+      targetView.innerHTML = `<p class="text-muted">Loading data...</p>`;
+    }
     return;
   }
 
-  document.querySelectorAll(".view").forEach((v) => { v.style.display = v.id === viewId ? "block" : "none"; });
-
+  // This switch now runs every time, guaranteeing the correct view is drawn.
   switch (viewId) {
-    case "commandBoardView": renderCommandBoardView(targetView, data); break;
-    case "reportingView": renderReportingView(targetView, data); break;
-    case "adminView": renderAdminView(targetView, data); break;
+    case "commandBoardView":
+      if (appState.currentIncident) {
+        reloadCurrentIncidentView();
+      } else {
+        renderCommandBoardView(targetView, data);
+      }
+      break;
+    case "reportingView":
+      renderReportingView(targetView, data);
+      break;
+    case "adminView":
+      renderAdminView(targetView, data);
+      break;
+    case "superAdminView":
+      renderSuperAdminView(targetView);
+      break;
   }
 }
 
-async function callApi(action, params = {}) {
+/**
+ * A secure, centralized function for making all API calls.
+ */
+async function callApi(action, params = {}, method = 'GET') {
   const API_URL = "https://us-central1-netresponders-apps-50.cloudfunctions.net/api";
   const url = new URL(API_URL);
-  url.searchParams.append("action", action);
-  for (const key in params) { url.searchParams.append(key, params[key]); }
-  try {
-    const response = await fetch(url);
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      const msg = errorData.message || `Network error: ${response.status}`;
-      throw new Error(msg);
+
+  const headers = {
+    'Authorization': `Bearer ${appState.idToken}`,
+    'Content-Type': 'application/json'
+  };
+
+  let options = {
+    method,
+    headers,
+  };
+
+  if (method.toUpperCase() === 'POST') {
+    options.body = JSON.stringify({ action, ...params });
+  } else { // GET request
+    url.searchParams.append("action", action);
+    for (const key in params) {
+      url.searchParams.append(key, params[key]);
     }
-    return response.json();
+  }
+
+  try {
+    const response = await fetch(url, options);
+
+    if (response.status === 401 || response.status === 403) {
+      console.warn("Authentication error detected. Forcing logout.");
+      await firebase.auth().signOut();
+      throw new Error("Your session has expired. Please log in again.");
+    }
+
+    const responseData = await response.json();
+
+    if (!response.ok) {
+        const msg = responseData.message || `Network error: ${response.statusText}`;
+        throw new Error(msg);
+    }
+
+    return responseData;
+
   } catch (error) {
     console.error(`API call error for action "${action}":`, error);
+    showError(error.message);
     throw error;
   }
 }
 
 function showError(message) {
   const errorDiv = document.getElementById("error-message");
-  if (errorDiv) { errorDiv.textContent = message; errorDiv.style.display = "block"; }
+  if (errorDiv) {
+    errorDiv.textContent = message;
+    errorDiv.style.display = "block";
+  }
 }
 function showLoader() {
   const loader = document.getElementById("loader");
@@ -324,59 +362,52 @@ function hideLoader() {
   if (loader) loader.style.display = "none";
 }
 
-
 /**
- * Handles the click of the "Split" button in the multi-action panel.
- * This FINAL version awaits the UI refresh and clears the selection state.
- * @param {HTMLButtonElement} button The button that was clicked.
+ * Handles the click of the manual refresh button ("Back to List").
+ * This is the definitive "reset" function. It now correctly calls
+ * clearIncidentDetails to ensure all listeners are detached.
  */
-async function handleMultiSplitClick(button) {
-    const groupId = button.dataset.groupId;
-    const unitIds = Array.from(appState.selectedGroupUnits[groupId] || []);
-
-    if (unitIds.length === 0) return;
-    if (!confirm(`Are you sure you want to split ${unitIds.length} selected unit(s)?`)) {
-        return;
-    }
-
-    showLoader();
-    try {
-        await callApi("splitMultipleUnits", {
-            id: appState.launchId,
-            incidentId: appState.currentIncident.id,
-            unitIds: unitIds.join(','),
-            groupId,
-        });
-
-        // --- THIS IS THE CORRECTED BLOCK ---
-        clearGroupSelectionState();
-        await loadGroupsForCurrentIncident();
-        await loadSplitUnits();
-
-    } catch (error) {
-        showError(error.message);
-    } finally {
-        hideLoader();
-    }
+async function handleManualRefresh() {
+  console.log("HANDLE MANUAL REFRESH: Triggered for a full reset.");
+  showLoader();
+  try {
+    clearAllIncidentListeners();
+    const response = await callApi("getInitialData");
+    if (!response.success) throw new Error(response.message);
+    appState.initialData = response.data;
+    appState.currentIncident = null;
+    appState.isViewOnly = false;
+    appState.isCommandRequestPending = false;
+    const viewContainer = document.getElementById('commandBoardView');
+    renderCommandBoardView(viewContainer, appState.initialData);
+  } catch (error) {
+    showError("Failed to refresh data.");
+  } finally {
+    hideLoader();
+  }
 }
 
 /**
- * Handles the click of the manual refresh button by re-running the
- * render function for the currently active view.
+ * Attaches a global, real-time listener to the active incidents list.
+ * Its ONLY job is to keep the appState.initialData.activeIncidents array
+ * up-to-date. It does not touch the DOM.
  */
-async function handleManualRefresh() {
-    console.log(`Manual refresh triggered for view: ${appState.currentViewId}`);
-    if (!appState.currentViewId) return;
-
-    showLoader();
-    try {
-        // Re-calling showView is the most robust way to refresh, as it
-        // contains all the necessary logic to render any view correctly.
-        await showView(appState.currentViewId);
-    } catch (error) {
-        showError("Failed to refresh data.");
-        console.error("Refresh Error:", error);
-    } finally {
-        hideLoader();
-    }
+function attachActiveIncidentsListener() {
+  if (activeIncidentsMasterListener) activeIncidentsMasterListener();
+  if (!appState.initialData || !appState.initialData.customerId) return;
+  const db = firebase.firestore();
+  activeIncidentsMasterListener = db.collection("incidents")
+    .where("status", "==", "Active")
+    .where("customerId", "==", appState.initialData.customerId)
+    .onSnapshot((snapshot) => {
+      const updatedIncidents = snapshot.docs.map(doc => {
+        const data = doc.data();
+        return {
+          id: doc.id, ...data,
+          startTime: data.startTime ? data.startTime.toDate().toISOString() : null,
+        };
+      });
+      appState.initialData.activeIncidents = updatedIncidents;
+      updateIncidentDropdownIfVisible();
+    });
 }

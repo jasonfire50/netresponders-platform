@@ -1,18 +1,13 @@
 /**
  * functions/index.js
- * This file contains complete backend API for the Command Board application.
- *
- * Version: 1.22.0
- * Changes in this version:
- * - Corrected all reported linting errors (max-len, indent, comma-dangle).
- * - Fixed a critical bug where new API functions (startParTimer,
- *   stopParTimer, getSplitUnitsForIncident) were defined but never
- *   wired into the API router, making them unusable.
- * - This is the definitive, stable version of the backend.
+ * Version: 3.1.0 (Lint Compliant)
+ * This is the definitive, secure backend API for the Command Board application,
+ * now with tiered licensing, session management, and full lint compliance.
  */
 
 const functions = require("firebase-functions");
 const admin = require("firebase-admin");
+const {onSchedule} = require("firebase-functions/v2/scheduler");
 
 admin.initializeApp();
 const db = admin.firestore();
@@ -24,41 +19,52 @@ const db = admin.firestore();
 // ===================================================================
 
 /**
- * Authenticates a request using the launchId and returns a full
- * authorization context, including the customerId and planLevel.
- * @param {string} launchId The unique launch ID from the request query.
- * @return {Promise<object>} An object containing {customerId, planLevel}.
+ * Verifies the Firebase Auth ID token and returns an authorization context.
+ * @param {object} req The Express request object.
+ * @return {Promise<object>} With {uid, customerId, planLevel}.
  * @throws {Error} If authentication fails.
  */
-async function getAuthContextFromLaunchId(launchId) {
-  if (!launchId) {
+async function getAuthContextFromIdToken(req) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
     throw new functions.https.HttpsError(
-        "unauthenticated", "No authentication ID was provided.",
+        "unauthenticated",
+        "No authentication token was provided.",
     );
   }
-  const userRef = db.collection("users").doc(launchId);
-  const userDoc = await userRef.get();
-  if (!userDoc.exists) {
-    throw new functions.https.HttpsError(
-        "not-found", "The provided authentication ID is invalid.",
-    );
-  }
-  const userData = userDoc.data();
-  if (userData.status !== "Active") {
-    throw new functions.https.HttpsError(
-        "permission-denied", "This account is not currently active.",
-    );
-  }
-  if (!userData.customerId) {
-    throw new functions.https.HttpsError(
-        "internal", "Configuration error: Customer ID missing for this user.",
-    );
-  }
+  const idToken = authHeader.split("Bearer ")[1];
 
-  return {
-    customerId: userData.customerId,
-    planLevel: userData.planLevel || "Basic",
-  };
+  try {
+    const decodedToken = await admin.auth().verifyIdToken(idToken);
+    const uid = decodedToken.uid;
+    const userRef = db.collection("users").doc(uid);
+    const userDoc = await userRef.get();
+    if (!userDoc.exists) {
+      const errorMsg = "Authenticated user not found in the database.";
+      throw new functions.https.HttpsError("not-found", errorMsg);
+    }
+    const userData = userDoc.data();
+    if (userData.status !== "Active") {
+      throw new functions.https.HttpsError(
+          "permission-denied",
+          "This user account is not active.",
+      );
+    }
+    if (!userData.customerId) {
+      const errorMsg = "Config error: Customer ID missing for this user.";
+      throw new functions.https.HttpsError("internal", errorMsg);
+    }
+    return {
+      uid: uid,
+      customerId: userData.customerId,
+      planLevel: userData.planLevel || "Basic",
+      name: userData.name || "Unknown User",
+    };
+  } catch (error) {
+    console.error("Error while verifying ID token:", error);
+    const errorMsg = "The provided auth token is invalid or expired.";
+    throw new functions.https.HttpsError("unauthenticated", errorMsg);
+  }
 }
 
 // ===================================================================
@@ -67,198 +73,765 @@ async function getAuthContextFromLaunchId(launchId) {
 //
 // ===================================================================
 
-/**
- * Main API router function.
- */
 exports.api = functions.https.onRequest(async (req, res) => {
   res.set("Access-Control-Allow-Origin", "*");
   res.set("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.set("Access-Control-Allow-Headers", "Content-Type");
+  res.set("Access-Control-Allow-Headers", "Content-Type, Authorization");
 
   if (req.method === "OPTIONS") {
     res.status(204).send("");
     return;
   }
 
-  const action = req.query.action;
+  const action = req.body.action || req.query.action;
+  const params = req.method === "POST" ? req.body : req.query;
 
   try {
-    const authContext = await getAuthContextFromLaunchId(req.query.id);
+    const authContext = await getAuthContextFromIdToken(req);
     const customerId = authContext.customerId;
-    console.log(
-        `Request authorized for customerId: ${customerId} ` +
-        `on plan: ${authContext.planLevel}`,
-    );
+    const logMsg =
+      `Request authorized for user UID: ${authContext.uid} ` +
+      `on customerId: ${customerId}`;
+    console.log(logMsg);
 
     let result;
+    // The main API switch, now handling new session actions
     switch (action) {
-      case "getInitialData":
-        result = await getInitialData(req.query, authContext);
+      // --- NEW SESSION MANAGEMENT ACTIONS ---
+      case "takeIncidentCommand":
+        result = await takeIncidentCommand(params, authContext);
         break;
-      case "getDepartments":
-        result = await getDepartments(req.query.id, customerId);
+      case "reestablishCommand":
+        result = await reestablishCommand(params, authContext);
+        break;
+      case "createSession":
+        result = await createSession(params, authContext);
+        break;
+      case "checkSessionStatus":
+        result = await checkSessionStatus(params, authContext);
+        break;
+      case "sessionHeartbeat":
+        result = await sessionHeartbeat(params, authContext);
+        break;
+      case "endSession":
+        result = await endSession(params, authContext);
+        break;
+
+      // --- EXISTING ACTIONS (alphabetized for clarity) ---
+      case "addCommonGroup":
+        result = await addCommonGroup(params, customerId);
         break;
       case "addDepartment":
-        result = await addDepartment(req.query, customerId);
+        result = await addDepartment(params, customerId);
         break;
-      case "updateFireDepartment":
-        result = await updateFireDepartment(req.query, customerId);
-        break;
-      case "deleteFireDepartment":
-        result = await deleteFireDepartment(req.query, customerId);
-        break;
-      case "getUnitsGroupedByStation":
-        result = await getUnitsGroupedByStation(req.query, customerId);
+      case "addTemplate":
+        result = await addTemplate(params, customerId);
         break;
       case "addUnitToMaster":
-        result = await addUnitToMaster(req.query, customerId);
+        result = await addUnitToMaster(params, authContext);
         break;
-      case "updateUnitInMaster":
-        result = await updateUnitInMaster(req.query, customerId);
+      case "addUnitType":
+        result = await addUnitType(params, customerId);
+        break;
+      case "adminGetAllUsers":
+        result = await getAllUsers(params, authContext);
+        break;
+      case "adminRevokeUserSessions":
+        result = await revokeUserSessions(params, authContext);
+        break;
+      case "adminSetNewPassword":
+        result = await setNewPasswordForUser(params, authContext);
+        break;
+      case "applyTemplateToIncident":
+        result = await applyTemplateToIncident(params, customerId);
+        break;
+      case "assignUnitsToGroup":
+        result = await assignUnitsToGroup(params, customerId);
+        break;
+      case "clearGroupParent":
+        result = await clearGroupParent(params, customerId);
+        break;
+      case "clearGroupSupervisor":
+        result = await clearGroupSupervisor(params, customerId);
+        break;
+      case "closeIncident":
+        result = await closeIncident(params, authContext);
+        break;
+      case "createGroupForIncident":
+        result = await createGroupForIncident(params, customerId);
+        break;
+      case "deleteCommonGroup":
+        result = await deleteCommonGroup(params, customerId);
+        break;
+      case "deleteFireDepartment":
+        result = await deleteFireDepartment(params, customerId);
+        break;
+      case "deleteIncident":
+        result = await deleteIncident(params, authContext);
+        break;
+      case "deleteTemplate":
+        result = await deleteTemplate(params, customerId);
         break;
       case "deleteUnitFromMaster":
-        result = await deleteUnitFromMaster(req.query, customerId);
+        result = await deleteUnitFromMaster(params, customerId);
+        break;
+      case "deleteUnitType":
+        result = await deleteUnitType(params, customerId);
+        break;
+      case "disbandGroup":
+        result = await disbandGroup(params, customerId);
+        break;
+      case "getActiveIncidents":
+        result = await getActiveIncidents(params, customerId);
+        break;
+      case "getAllAvailableUnitsGroupedByDept":
+        result = await getAllAvailableUnitsGroupedByDept(customerId);
+        break;
+      case "getClosedIncidents":
+        result = await getClosedIncidents(params, customerId);
         break;
       case "getCommonGroups":
         result = await getCollectionData("commonGroups", customerId);
         break;
-      case "addCommonGroup":
-        result = await addCommonGroup(req.query, customerId);
+      case "getDepartments":
+        result = await getDepartments(customerId);
         break;
-      case "updateCommonGroup":
-        result = await updateCommonGroup(req.query, customerId);
+      case "getGroupsForIncident":
+        result = await getGroupsForIncident(params, customerId);
         break;
-      case "deleteCommonGroup":
-        result = await deleteCommonGroup(req.query, customerId);
+      case "getIncidentDetails":
+        result = await getIncidentDetails(params, customerId);
         break;
-      case "getTemplates":
-        result = await getTemplates(req.query, customerId);
-        break;
-      case "addTemplate":
-        result = await addTemplate(req.query, customerId);
-        break;
-      case "updateTemplate":
-        result = await updateTemplate(req.query, customerId);
-        break;
-      case "deleteTemplate":
-        result = await deleteTemplate(req.query, customerId);
+      case "getInitialData":
+        result = await getInitialData(authContext);
         break;
       case "getSettings":
-        result = await getSettings(req.query, customerId);
+        result = await getSettings(params, customerId);
         break;
-      case "updateSettings":
-        result = await updateSettings(req.query, customerId);
+      case "getSplitUnitsForIncident":
+        result = await getSplitUnitsForIncident(params, customerId);
         break;
-      case "getAllAvailableUnitsGroupedByDept":
-        result = await getAllAvailableUnitsGroupedByDept(
-            req.query,
-            customerId,
-        );
+      case "getTemplates":
+        result = await getTemplates(params, customerId);
         break;
       case "getUnitTypes":
         result = await getCollectionData("unitTypes", customerId);
         break;
-      case "addUnitType":
-        result = await addUnitType(req.query, customerId);
-        break;
-      case "updateUnitType":
-        result = await updateUnitType(req.query, customerId);
-        break;
-      case "deleteUnitType":
-        result = await deleteUnitType(req.query, customerId);
-        break;
-      case "getActiveIncidents":
-        result = await getActiveIncidents(req.query, customerId);
-        break;
-      case "getClosedIncidents":
-        result = await getClosedIncidents(req.query, customerId);
-        break;
-      case "startNewIncident":
-        result = await startNewIncident(req.query, customerId);
-        break;
-      case "getGroupsForIncident":
-        result = await getGroupsForIncident(req.query, customerId);
-        break;
-      case "createGroupForIncident":
-        result = await createGroupForIncident(req.query, customerId);
-        break;
-      case "assignUnitsToGroup":
-        result = await assignUnitsToGroup(req.query, customerId);
-        break;
-      case "moveUnitToNewGroup":
-        result = await moveUnitToNewGroup(req.query, customerId);
-        break;
-      case "releaseUnitToAvailable":
-        result = await releaseUnitToAvailable(req.query, customerId);
-        break;
-      case "setGroupSupervisor":
-        result = await setGroupSupervisor(req.query, customerId);
-        break;
-      case "clearGroupSupervisor":
-        result = await clearGroupSupervisor(req.query, customerId);
-        break;
-      case "updateGroupBenchmark":
-        result = await updateGroupBenchmark(req.query, customerId);
-        break;
-      case "closeIncident":
-        result = await closeIncident(req.query, customerId);
-        break;
-      case "applyTemplateToIncident":
-        result = await applyTemplateToIncident(req.query, customerId);
+      case "getUnitsGroupedByStation":
+        result = await getUnitsGroupedByStation(params, customerId);
         break;
       case "moveMultipleUnits":
-        result = await moveMultipleUnits(req.query, customerId);
+        result = await moveMultipleUnits(params, customerId);
+        break;
+      case "moveUnitToNewGroup":
+        result = await moveUnitToNewGroup(params, customerId);
         break;
       case "releaseMultipleUnits":
-        result = await releaseMultipleUnits(req.query, customerId);
+        result = await releaseMultipleUnits(params, customerId);
         break;
-      case "splitUnit":
-        result = await splitUnit(req.query, customerId);
-        break;
-      case "unsplitUnit":
-        result = await unsplitUnit(req.query, customerId);
-        break;
-      case "splitMultipleUnits":
-        result = await splitMultipleUnits(req.query, customerId);
-        break;
-      case "updateGroupOrder":
-        result = await updateGroupOrder(req.query, customerId);
+      case "releaseUnitToAvailable":
+        result = await releaseUnitToAvailable(params, customerId);
         break;
       case "setGroupParent":
-        result = await setGroupParent(req.query, customerId);
+        result = await setGroupParent(params, customerId);
         break;
-      case "clearGroupParent":
-        result = await clearGroupParent(req.query, customerId);
+      case "setGroupSupervisor":
+        result = await setGroupSupervisor(params, customerId);
         break;
-      case "disbandGroup":
-        result = await disbandGroup(req.query, customerId);
+      case "splitMultipleUnits":
+        result = await splitMultipleUnits(params, customerId);
         break;
-      case "deleteIncident":
-        result = await deleteIncident(req.query, customerId);
+      case "splitUnit":
+        result = await splitUnit(params, customerId);
+        break;
+      case "startNewIncident":
+        result = await startNewIncident(params, authContext);
         break;
       case "startParTimer":
-        result = await startParTimer(req.query, customerId);
+        result = await startParTimer(params, customerId);
         break;
       case "stopParTimer":
-        result = await stopParTimer(req.query, customerId);
+        result = await stopParTimer(params, customerId);
         break;
-      case "getSplitUnitsForIncident":
-        result = await getSplitUnitsForIncident(req.query, customerId);
+      case "unsplitUnit":
+        result = await unsplitUnit(params, customerId);
         break;
-
-      default: throw new Error("Invalid action specified.");
+      case "updateCommonGroup":
+        result = await updateCommonGroup(params, customerId);
+        break;
+      case "updateFireDepartment":
+        result = await updateFireDepartment(params, customerId);
+        break;
+      case "updateGroupBenchmark":
+        result = await updateGroupBenchmark(params, customerId);
+        break;
+      case "updateGroupOrder":
+        result = await updateGroupOrder(params, customerId);
+        break;
+      case "updateSettings":
+        result = await updateSettings(params, customerId);
+        break;
+      case "updateTemplate":
+        result = await updateTemplate(params, customerId);
+        break;
+      case "updateUnitInMaster":
+        result = await updateUnitInMaster(params, customerId);
+        break;
+      case "updateUnitType":
+        result = await updateUnitType(params, customerId);
+        break;
+      case "requestIncidentCommand":
+        result = await requestIncidentCommand(params, authContext);
+        break;
+      case "approveCommandRequest":
+        result = await approveCommandRequest(params, authContext);
+        break;
+      case "denyCommandRequest":
+        result = await denyCommandRequest(params, authContext);
+        break;
+      default:
+        throw new Error("Invalid action specified.");
     }
     res.status(200).json({success: true, data: result});
   } catch (error) {
     console.error(`API Error on action "${action}":`, error);
     if (error instanceof functions.https.HttpsError) {
-      res.status(error.httpErrorCode.status)
-          .json({success: false, message: error.message});
+      const status = error.httpErrorCode.status;
+      // Create object first to satisfy object-curly-spacing rule
+      const responseJson = {success: false, message: error.message};
+      res.status(status).json(responseJson);
     } else {
-      res.status(500).json({success: false, message: error.message});
+      const responseJson = {success: false, message: error.message};
+      res.status(500).json(responseJson);
     }
   }
 });
+
+// ===================================================================
+//
+//  SESSION AND COMMAND MANAGEMENT (NEW FUNCTIONS)
+//
+// ===================================================================
+
+/**
+ * Creates a new session for a user, implementing a hierarchical model to
+ * manage a limited pool of device slots. It prioritizes re-entry for active
+ * commanders, then allows bumping of truly stale devices, ensuring maximum
+ * availability and stability during critical events.
+ * @param {object} params The request params (can be empty).
+ * @param {object} authContext The user's authorization context.
+ * @return {Promise<object>} An object containing the new sessionId.
+ */
+async function createSession(params, authContext) {
+  const {uid, customerId} = authContext;
+
+  const customerRef = db.collection("customers").doc(customerId);
+  const sessionsRef = db.collection("sessions");
+  const incidentsRef = db.collection("incidents");
+
+  const [customerDoc, currentSessionsSnapshot] = await Promise.all([
+    customerRef.get(),
+    sessionsRef.where("customerId", "==", customerId).get(),
+  ]);
+
+  if (!customerDoc.exists) {
+    throw new functions.https.HttpsError("not-found", "Customer not found.");
+  }
+
+  const maxTotalSessions = customerDoc.data().maxTotalSessions || 1;
+  const currentSessionCount = currentSessionsSnapshot.size;
+
+  // --- CHECK #1: "Happy Path" - Is there an open slot? ---
+  if (currentSessionCount < maxTotalSessions) {
+    const now = new Date();
+    const sessionData = {uid, customerId, loginTime: now, lastActive: now};
+    const newSessionRef = await sessionsRef.add(sessionData);
+    console.log(`Granted new session ${newSessionRef.id} in an open slot.`);
+    return {sessionId: newSessionRef.id};
+  }
+
+  // --- SLOTS ARE FULL. PROCEED TO HIERARCHICAL CHECKS ---
+  console.log(`Session limit reached for customer ${customerId}.`);
+
+  // --- CHECK #2: "Privileged Re-entry for Commander" ---
+  const commanderQuery = incidentsRef
+      .where("customerId", "==", customerId)
+      .where("commanderUid", "==", uid)
+      .where("status", "==", "Active")
+      .limit(1);
+
+  const commanderSnapshot = await commanderQuery.get();
+  if (!commanderSnapshot.empty) {
+    const incidentDoc = commanderSnapshot.docs[0];
+    const oldSessionId = incidentDoc.data().commanderSessionId;
+
+    if (oldSessionId) {
+      const logMsg = `Privileged re-entry: User ${uid} is an active ` +
+        `commander. Bumping their old session ${oldSessionId}.`;
+      console.log(logMsg);
+      await sessionsRef.doc(oldSessionId).delete();
+      const now = new Date();
+      const sessionData = {uid, customerId, loginTime: now, lastActive: now};
+      const newSessionRef = await sessionsRef.add(sessionData);
+      return {sessionId: newSessionRef.id};
+    }
+  }
+
+  // --- CHECK #3: "General Bumping" of Stale, Non-Commanding Sessions ---
+  const now = new Date();
+  const fifteenMinutesInMs = 15 * 60 * 1000;
+  const staleThreshold = new Date(now.getTime() - fifteenMinutesInMs);
+
+  const activeCmdIncidents = await incidentsRef
+      .where("customerId", "==", customerId)
+      .where("status", "==", "Active")
+      .where("commanderSessionId", "!=", null).get();
+  const commandingSessionIds = new Set();
+  activeCmdIncidents.forEach((doc) => {
+    commandingSessionIds.add(doc.data().commanderSessionId);
+  });
+
+  let oldestStaleSession = null;
+  currentSessionsSnapshot.forEach((doc) => {
+    const isCommanding = commandingSessionIds.has(doc.id);
+    const lastActiveTime = doc.data().lastActive.toDate();
+
+    if (!isCommanding && lastActiveTime < staleThreshold) {
+      // --- THIS IS THE CORRECTED, LINT-COMPLIANT LINE ---
+      const isOlder =
+        !oldestStaleSession || lastActiveTime < oldestStaleSession.lastActive;
+
+      if (isOlder) {
+        oldestStaleSession = {id: doc.id, lastActive: lastActiveTime};
+      }
+    }
+  });
+
+  if (oldestStaleSession) {
+    const logMsg = "Bumping oldest stale session " +
+      `${oldestStaleSession.id} to make room.`;
+    console.log(logMsg);
+    await sessionsRef.doc(oldestStaleSession.id).delete();
+    const sessionData = {uid, customerId, loginTime: now, lastActive: now};
+    const newSessionRef = await sessionsRef.add(sessionData);
+    return {sessionId: newSessionRef.id};
+  }
+
+  // --- CHECK #4: Hard Failure ---
+  const errorMsg = "All available device slots are currently in active " +
+    "use. Please log out from another device or wait for one to become " +
+    "inactive.";
+  throw new functions.https.HttpsError("permission-denied", errorMsg);
+}
+
+/**
+ * Updates the 'lastActive' timestamp on a user's session document.
+ * @param {object} params The request params containing the sessionId.
+ * @param {string} params.sessionId The unique ID of the session to update.
+ * @param {object} authContext The authorization context.
+ * @return {Promise<object>} A success message.
+ */
+async function sessionHeartbeat(params, authContext) {
+  const {sessionId} = params;
+  if (!sessionId) {
+    const errorMsg = "A sessionId is required.";
+    throw new functions.https.HttpsError("invalid-argument", errorMsg);
+  }
+  const sessionRef = db.collection("sessions").doc(sessionId);
+  const sessionDoc = await sessionRef.get();
+  if (!sessionDoc.exists || sessionDoc.data().uid !== authContext.uid) {
+    const errorMsg = "Session not found or access denied.";
+    throw new functions.https.HttpsError("not-found", errorMsg);
+  }
+  await sessionRef.update({lastActive: new Date()});
+  return {message: "Heartbeat received."};
+}
+
+/**
+ * Checks if the current user should be locked out or in view-only mode.
+ * @param {object} params The request params containing the sessionId.
+ * @param {string} params.sessionId The user's current session ID.
+ * @param {object} authContext The user's auth context.
+ * @return {Promise<object>} A status object.
+ */
+async function checkSessionStatus(params, authContext) {
+  const {uid, customerId, planLevel} = authContext;
+
+  const incidentsRef = db.collection("incidents");
+  const commandingQuery = incidentsRef
+      .where("customerId", "==", customerId)
+      .where("commanderUid", "==", uid)
+      .limit(1);
+
+  const snapshot = await commandingQuery.get();
+  if (snapshot.empty) {
+    return {status: "ok"};
+  }
+
+  const incidentData = snapshot.docs[0].data();
+  const commandedSessionId = incidentData.commanderSessionId;
+
+  if (planLevel === "Basic" && params.sessionId !== commandedSessionId) {
+    const message = "This account is already commanding an incident " +
+      "on another device. Basic plan users are limited to one " +
+      "command session at a time.";
+    return {
+      status: "locked_out",
+      message: message,
+    };
+  }
+
+  if (planLevel === "Pro" && params.sessionId !== commandedSessionId) {
+    const message = "This account is commanding an incident on another " +
+      "device. You can observe in View-Only mode.";
+    return {
+      status: "view_only_recommended",
+      message: message,
+    };
+  }
+
+  return {status: "ok"};
+}
+
+/**
+ * Allows a user to take command of an incident, enforcing all plan-based
+ * rules, including department-wide and individual user limits.
+ * @param {object} params The request params.
+ * @param {string} params.incidentId The ID of the incident.
+ * @param {string} params.sessionId The user's current session ID.
+ * @param {object} authContext The user's authorization context, containing
+ *     their UID and customerId.
+ * @return {Promise<object>} A status object indicating success.
+ */
+async function takeIncidentCommand(params, authContext) {
+  const {incidentId, sessionId} = params;
+  const {uid, customerId} = authContext;
+
+  if (!incidentId || !sessionId) {
+    const errorMsg = "Incident ID and Session ID are required.";
+    throw new functions.https.HttpsError("invalid-argument", errorMsg);
+  }
+
+  const sessionRef = db.collection("sessions").doc(sessionId);
+  const sessionDoc = await sessionRef.get();
+  if (!sessionDoc.exists || sessionDoc.data().uid !== uid) {
+    const errorMsg = "Your session is invalid. Please log in again.";
+    throw new functions.https.HttpsError("permission-denied", errorMsg);
+  }
+
+  const customerRef = db.collection("customers").doc(customerId);
+  const incidentsRef = db.collection("incidents");
+  const incidentRef = incidentsRef.doc(incidentId);
+
+  return db.runTransaction(async (transaction) => {
+    const [customerDoc, incidentDoc] = await Promise.all([
+      transaction.get(customerRef),
+      transaction.get(incidentRef),
+    ]);
+
+    if (!customerDoc.exists) {
+      throw new Error("Customer profile not found.");
+    }
+    if (!incidentDoc.exists || incidentDoc.data().customerId !== customerId) {
+      throw new Error("Incident not found or access denied.");
+    }
+
+    // Gatekeeper Check #1: Department-Level Command Licenses
+    const maxCommandLicenses = customerDoc.data().maxCommandLicenses || 1;
+    const commandingIncidentsQuery = incidentsRef
+        .where("customerId", "==", customerId)
+        .where("status", "==", "Active")
+        .where("commanderUid", "!=", null);
+    const commandingSnapshot = await transaction.get(commandingIncidentsQuery);
+
+    if (commandingSnapshot.size >= maxCommandLicenses) {
+      // Allow taking over your own command on another device.
+      const incidentData = incidentDoc.data();
+      if (incidentData.commanderUid !== uid) {
+        const errorMsg = "All available command licenses for your " +
+          "department are currently in use.";
+        throw new functions.https.HttpsError("permission-denied", errorMsg);
+      }
+    }
+
+    // Gatekeeper Check #2: Individual User Limit (1 incident per user)
+    const userIncidentsQuery = incidentsRef
+        .where("customerId", "==", customerId)
+        .where("commanderUid", "==", uid)
+        .where(admin.firestore.FieldPath.documentId(), "!=", incidentId);
+    const userIncidentsSnapshot = await transaction.get(userIncidentsQuery);
+
+    if (!userIncidentsSnapshot.empty) {
+      const errorMsg = "This account is already commanding another " +
+        "active incident. Please close it first.";
+      throw new functions.https.HttpsError("permission-denied", errorMsg);
+    }
+    // End of Gatekeeper Checks
+
+    transaction.update(incidentRef, {
+      commanderUid: uid,
+      commanderSessionId: sessionId,
+    });
+
+    return {status: "command_granted"};
+  });
+}
+
+/**
+ * Deletes a session document upon user logout.
+ * @param {object} params The request params containing the sessionId.
+ * @param {string} params.sessionId The unique ID of the session to delete.
+ * @param {object} authContext The authorization context.
+ * @return {Promise<object>} A success message.
+ */
+async function endSession(params, authContext) {
+  const {sessionId} = params;
+  if (!sessionId) {
+    const errorMsg = "A sessionId is required.";
+    throw new functions.https.HttpsError("invalid-argument", errorMsg);
+  }
+
+  const sessionRef = db.collection("sessions").doc(sessionId);
+  const sessionDoc = await sessionRef.get();
+
+  if (sessionDoc.exists && sessionDoc.data().uid === authContext.uid) {
+    await sessionRef.delete();
+    return {message: "Session ended successfully."};
+  }
+  return {message: "Session not found or access denied."};
+}
+
+/**
+ * Creates a request for a user to take command of an incident.
+ * This version now includes the requester's session ID for a clean transfer.
+ * @param {object} params The request params.
+ * @param {string} params.incidentId The ID of the incident.
+ * @param {object} authContext The authorization context of the requester.
+ * @return {Promise<object>} The new command request document.
+ */
+async function requestIncidentCommand(params, authContext) {
+  // --- THIS IS THE NEW LINE ---
+  const {incidentId, sessionId} = params;
+  const {uid, name, customerId} = authContext;
+
+  if (!incidentId || !sessionId) {
+    const errorMsg = "Incident ID and Session ID are required for a request.";
+    throw new functions.https.HttpsError("invalid-argument", errorMsg);
+  }
+
+  const {data: incidentData} =
+    await getAndVerifyDoc("incidents", incidentId, customerId);
+
+  if (!incidentData.commanderUid) {
+    const errorMsg = "This incident is not currently commanded. " +
+      "You can take command directly.";
+    throw new functions.https.HttpsError("failed-precondition", errorMsg);
+  }
+  if (incidentData.commanderUid === uid) {
+    const errorMsg = "You are already the commander of this incident.";
+    throw new functions.https.HttpsError("failed-precondition", errorMsg);
+  }
+
+  const existingReqQuery = db.collection("commandRequests")
+      .where("incidentId", "==", incidentId)
+      .where("status", "==", "pending")
+      .limit(1);
+  const existingReqSnapshot = await existingReqQuery.get();
+  if (!existingReqSnapshot.empty) {
+    const errorMsg = "A command request for this incident is already pending.";
+    throw new functions.https.HttpsError("already-exists", errorMsg);
+  }
+
+  const newRequest = {
+    incidentId: incidentId,
+    requesterUid: uid,
+    requesterName: name,
+    // --- THIS IS THE NEW FIELD ---
+    requesterSessionId: sessionId,
+    currentCommanderUid: incidentData.commanderUid,
+    status: "pending",
+    requestTimestamp: new Date(),
+    customerId: customerId,
+  };
+
+  const docRef = await db.collection("commandRequests").add(newRequest);
+
+  const logDetails = `User ${newRequest.requesterName} requested command.`;
+  await logIncidentAction({
+    customerId: customerId,
+    incidentId: incidentId,
+    eventType: "COMMAND_REQUEST",
+    details: logDetails,
+    metadata: {requesterUid: uid, commanderUid: incidentData.commanderUid},
+  });
+
+  return {id: docRef.id, ...newRequest};
+}
+
+/**
+ * Approves a command request, transferring command to the requester.
+ * This version now reads the requester's session ID from the request doc.
+ * @param {object} params The request params.
+ * @param {string} params.requestId The ID of the commandRequest document.
+ * @param {string} params.sessionId The new commander's session ID.
+ * @param {object} authContext The commander approving the request.
+ * @return {Promise<object>} A success message.
+ */
+async function approveCommandRequest(params, authContext) {
+  const {requestId} = params; // No longer need sessionId from the approver
+  if (!requestId) {
+    const errorMsg = "A Request ID is required to approve command.";
+    throw new functions.https.HttpsError("invalid-argument", errorMsg);
+  }
+
+  const requestRef = db.collection("commandRequests").doc(requestId);
+
+  return db.runTransaction(async (transaction) => {
+    const requestDoc = await transaction.get(requestRef);
+    if (!requestDoc.exists) {
+      throw new Error("Command request not found.");
+    }
+    const requestData = requestDoc.data();
+
+    // Security check: only the current commander can approve
+    if (requestData.currentCommanderUid !== authContext.uid) {
+      const authError = "You are not authorized to approve this request.";
+      throw new functions.https.HttpsError("permission-denied", authError);
+    }
+
+    if (!requestData.requesterSessionId) {
+      throw new Error("Cannot approve: Requester session ID is missing.");
+    }
+
+    const incidentRef = db.collection("incidents").doc(requestData.incidentId);
+
+    transaction.update(incidentRef, {
+      commanderUid: requestData.requesterUid,
+      commanderSessionId: requestData.requesterSessionId,
+    });
+
+    transaction.update(requestRef, {status: "approved"});
+
+    const logDetails = `Command transferred to ${requestData.requesterName}.`;
+    await logIncidentAction({
+      customerId: authContext.customerId,
+      incidentId: requestData.incidentId,
+      eventType: "COMMAND_APPROVED",
+      details: logDetails,
+      metadata: {
+        approvedBy: authContext.uid,
+        newCommander: requestData.requesterUid,
+      },
+    });
+    return {message: "Command approved."};
+  });
+}
+
+
+/**
+ * Denies a command request.
+ * @param {object} params The request params.
+ * @param {string} params.requestId The ID of the commandRequest document.
+ * @param {object} authContext The commander denying the request.
+ * @return {Promise<object>} A success message.
+ */
+async function denyCommandRequest(params, authContext) {
+  const {requestId} = params;
+  if (!requestId) {
+    const errorMsg = "Request ID is required.";
+    throw new functions.https.HttpsError("invalid-argument", errorMsg);
+  }
+
+  const requestRef = db.collection("commandRequests").doc(requestId);
+  const requestDoc = await requestRef.get();
+  if (!requestDoc.exists) {
+    throw new Error("Command request not found.");
+  }
+  const requestData = requestDoc.data();
+
+  if (requestData.currentCommanderUid !== authContext.uid) {
+    const authError = "You are not authorized to deny this request.";
+    throw new functions.https.HttpsError("permission-denied", authError);
+  }
+
+  await requestRef.update({status: "denied"});
+
+  const logDetails =
+    `Command request from ${requestData.requesterName} was denied.`;
+  await logIncidentAction({
+    customerId: authContext.customerId,
+    incidentId: requestData.incidentId,
+    eventType: "COMMAND_DENIED",
+    details: logDetails,
+    metadata: {
+      deniedBy: authContext.uid,
+      requester: requestData.requesterUid,
+    },
+  });
+
+  return {message: "Request denied."};
+}
+
+/**
+ * Allows user to re-establish their command of an incident with a new session.
+ * This is a specific action used when a commander reconnects on a new device
+ * or after their previous session has expired.
+ * @param {object} params The request params.
+ * @param {string} params.incidentId The ID of the incident.
+ * @param {string} params.sessionId The user's NEW session ID.
+ * @param {object} authContext The user's authorization context.
+ * @return {Promise<object>} A status object indicating success.
+ */
+async function reestablishCommand(params, authContext) {
+  const {incidentId, sessionId} = params;
+  const {uid} = authContext; // The user's UID from their ID token.
+
+  if (!incidentId || !sessionId) {
+    const errorMsg = "Incident ID and Session ID are required.";
+    throw new functions.https.HttpsError("invalid-argument", errorMsg);
+  }
+
+  const incidentRef = db.collection("incidents").doc(incidentId);
+
+  // Use a transaction to ensure the check and the update happen atomically.
+  return db.runTransaction(async (transaction) => {
+    const incidentDoc = await transaction.get(incidentRef);
+
+    if (!incidentDoc.exists) {
+      throw new Error("Incident not found.");
+    }
+
+    const incidentData = incidentDoc.data();
+
+    // THIS IS THE CRITICAL SECURITY CHECK:
+    // We verify that the user making this request (uid) is the same user
+    // who is currently listed as the commander on the incident.
+    if (incidentData.commanderUid !== uid) {
+      // If they don't match, this is an unauthorized attempt.
+      const errorMsg = "Permission denied. You are not the current commander.";
+      throw new functions.https.HttpsError("permission-denied", errorMsg);
+    }
+
+    // If the check passes, it's safe to update the incident with the new
+    // session ID, effectively resuming their command.
+    transaction.update(incidentRef, {
+      commanderSessionId: sessionId,
+    });
+
+    // Log this action for auditing purposes.
+    const logDetails = `Commander ${authContext.name} re-established command.`;
+    await logIncidentAction({
+      customerId: authContext.customerId,
+      incidentId: incidentId,
+      eventType: "COMMAND_REESTABLISHED",
+      details: logDetails,
+      metadata: {uid, newSessionId: sessionId},
+    });
+
+    return {status: "command_reestablished"};
+  });
+}
+
 
 // ===================================================================
 //
@@ -288,8 +861,7 @@ async function logIncidentAction(logData) {
 }
 
 /**
- * A generic helper to fetch all documents from any specified collection
- * that belong to the authenticated customer.
+ * A generic helper to fetch documents that belong to the customer.
  * @param {string} collectionName The name of the Firestore collection.
  * @param {string} customerId The authenticated customer's ID.
  * @return {Promise<Array<object>>} An array of document data.
@@ -321,21 +893,67 @@ async function getAndVerifyDoc(collectionName, docId, customerId) {
   }
   const data = doc.data();
   if (data.customerId !== customerId) {
-    throw new functions.https.HttpsError(
-        "permission-denied", `Access denied to ${collectionName} document.`);
+    const errorMsg = `Access denied to ${collectionName} document.`;
+    throw new functions.https.HttpsError("permission-denied", errorMsg);
   }
   return {ref: docRef, data: data};
 }
 
 /**
+ * Fetches the latest data for a single incident.
+ * @param {object} params The request params.
+ * @param {string} params.incidentId The ID of the incident to fetch.
+ * @param {string} customerId The authenticated customer's ID.
+ * @return {Promise<object>} The full incident document data, including its ID.
+ */
+/**
+ * Fetches the latest data for a single incident. This version guarantees that
+ * the commanderSessionId is always included in the response.
+ * @param {object} params The request params.
+ * @param {string} params.incidentId The ID of the incident to fetch.
+ * @param {string} customerId The authenticated customer's ID.
+ * @return {Promise<object>} The full incident document data.
+ */
+async function getIncidentDetails(params, customerId) {
+  const {incidentId} = params;
+  if (!incidentId) {
+    throw new Error("Incident ID is required.");
+  }
+
+  // --- THIS IS THE CORRECTED, LINT-COMPLIANT BLOCK ---
+  // The function call is broken into multiple lines to respect the
+  // 80-character limit.
+  const docDetails = await getAndVerifyDoc(
+      "incidents",
+      incidentId,
+      customerId,
+  );
+  const {data, ref} = docDetails;
+  // --- END OF CORRECTION ---
+
+  const startTime = data.startTime ?
+    data.startTime.toDate().toISOString() :
+    null;
+
+  // Explicitly create the final return object to ensure that
+  // commanderSessionId is included, even if it's null.
+  const incidentDetails = {
+    id: ref.id,
+    ...data,
+    startTime: startTime,
+    commanderSessionId: data.commanderSessionId || null,
+  };
+
+  return incidentDetails;
+}
+
+/**
  * Fetches all the initial data needed to bootstrap the front-end.
- * This version now includes the user's planLevel in the payload.
- * @param {object} query The request query parameters.
  * @param {object} authContext The authorization context for the user.
  * @return {Promise<object>} An object containing all initial data for the app.
  */
-async function getInitialData(query, authContext) {
-  const customerId = authContext.customerId;
+async function getInitialData(authContext) {
+  const {customerId, planLevel} = authContext; // Already have it here
 
   const [
     departments,
@@ -345,46 +963,42 @@ async function getInitialData(query, authContext) {
     activeIncidents,
     settings,
   ] = await Promise.all([
-    getDepartments(query.id, customerId),
+    getDepartments(customerId),
     getCollectionData("unitTypes", customerId),
     getCollectionData("commonGroups", customerId),
     getCollectionData("templates", customerId),
-    getActiveIncidents(query, customerId),
-    getSettings(query, customerId),
+    getActiveIncidents({}, customerId),
+    getSettings({}, customerId),
   ]);
 
   return {
+    // --- THIS IS THE NEW LINE ---
+    customerId: customerId, // Pass the customerId to the frontend
     fireDepartments: departments,
-    unitTypes: unitTypes,
-    commonGroups: commonGroups,
-    templates: templates,
-    activeIncidents: activeIncidents,
-    settings: settings,
-    planLevel: authContext.planLevel,
+    unitTypes,
+    commonGroups,
+    templates,
+    activeIncidents,
+    settings,
+    planLevel,
   };
 }
-
 
 // --- Department Management ---
 
 /**
- * Fetches departments for a customer and flags the user's primary department.
- * This version reads the primaryDepartmentId from the parent CUSTOMER document.
- * @param {string} launchId The user's launch ID.
+ * Fetches departments for a customer and flags the primary department.
  * @param {string} customerId The authenticated customer's ID.
  * @return {Promise<Array<object>>} The list of department documents.
  */
-async function getDepartments(launchId, customerId) {
+async function getDepartments(customerId) {
   const customerRef = db.collection("customers").doc(customerId);
   const customerDoc = await customerRef.get();
-
   let primaryDeptId = null;
   if (customerDoc.exists) {
     primaryDeptId = customerDoc.data().primaryDepartmentId;
   }
-
   const departments = await getCollectionData("departments", customerId);
-
   return departments.map((dept) => ({
     ...dept,
     isPrimary: dept.id === primaryDeptId,
@@ -571,47 +1185,30 @@ async function getUnitsGroupedByStation(query, customerId) {
 
 /**
  * Adds a new unit to the master list for a customer.
- * This version uses departmentId and is lint-compliant.
+ * Now takes the full authContext to check for planLevel limits.
  * @param {object} query The request query parameters.
- * @param {string} customerId The authenticated customer's ID.
+ * @param {object} authContext The full authorization context.
  * @return {Promise<object>} The new unit document.
  */
-async function addUnitToMaster(query, customerId) {
+async function addUnitToMaster(query, authContext) {
+  const {customerId, planLevel} = authContext;
   const {
-    departmentId, // Use the new consistent name.
-    unit,
-    unitTypeId,
-    unitName,
-    status,
-    notes,
-    stationName,
-    id: launchId,
+    departmentId, unit, unitTypeId, unitName, status, notes, stationName,
   } = query;
-
   if (!departmentId || !unit || !unitTypeId || !unitName || !status) {
     throw new Error("All required fields must be provided.");
   }
-
-  // --- Feature Gate Logic (remains the same) ---
-  const authContext = await getAuthContextFromLaunchId(launchId);
-  if (authContext.planLevel === "Basic") {
+  if (planLevel === "Basic") {
     const unitsRef = db.collection("units");
     const unitsQuery = unitsRef.where("customerId", "==", customerId);
     const unitsSnapshot = await unitsQuery.get();
-
     if (unitsSnapshot.size >= 50) {
-      const errorMessage =
-        "Unit limit reached. Upgrade to the Pro plan to add more units.";
-      throw new functions.https.HttpsError(
-          "permission-denied",
-          errorMessage,
-      );
+      const errorMsg = "Unit limit reached. Upgrade to add more units.";
+      throw new functions.https.HttpsError("permission-denied", errorMsg);
     }
   }
-  // --- End Feature Gate Logic ---
-
   const newUnitData = {
-    departmentId, // Save with the new consistent field name.
+    departmentId,
     unit: unit.trim().toUpperCase(),
     unitTypeId,
     unitName: unitName.trim(),
@@ -884,13 +1481,20 @@ async function getActiveIncidents(query, customerId) {
       .where("customerId", "==", customerId)
       .where("status", "==", "Active")
       .get();
-  if (snapshot.empty) return [];
+  if (snapshot.empty) {
+    return [];
+  }
   return snapshot.docs.map((doc) => {
     const data = doc.data();
+    // This ternary operator is now formatted to be lint-compliant.
+    const startTime = data.startTime ?
+      data.startTime.toDate().toISOString() :
+      null;
     return {
       id: doc.id,
       ...data,
-      startTime: data.startTime ? data.startTime.toDate().toISOString() : null,
+      commanderUid: data.commanderUid || null,
+      startTime: startTime,
     };
   });
 }
@@ -920,97 +1524,150 @@ async function getClosedIncidents(query, customerId) {
 }
 
 /**
- * Starts a new incident for a customer.
+ * Starts a new incident, enforcing all command license rules.
  * @param {object} query The request query parameters.
- * @param {string} customerId The authenticated customer's ID.
+ * @param {object} authContext The full authorization context.
  * @return {Promise<object>} The new incident document.
  */
-async function startNewIncident(query, customerId) {
-  const {incidentNumber, incidentName} = query;
-  const timestamp = new Date();
-  const year = timestamp.getFullYear();
-  const month = (timestamp.getMonth() + 1).toString().padStart(2, "0");
-  const day = timestamp.getDate().toString().padStart(2, "0");
-  const hours = timestamp.getHours().toString().padStart(2, "0");
-  const minutes = timestamp.getMinutes().toString().padStart(2, "0");
+async function startNewIncident(query, authContext) {
+  const {uid, customerId} = authContext;
+  const {incidentNumber, incidentName, sessionId} = query;
 
-  const numberToSave = (incidentNumber && incidentNumber.trim() !== "") ?
-    incidentNumber.trim() : `${year}${month}${day}-${hours}${minutes}`;
+  if (!sessionId) {
+    const errorMsg = "A valid sessionId is required to start an incident.";
+    throw new functions.https.HttpsError("invalid-argument", errorMsg);
+  }
+
+  // --- GATEKEEPER CHECKS ---
+  const customerRef = db.collection("customers").doc(customerId);
+  const incidentsRef = db.collection("incidents");
+
+  const customerDoc = await customerRef.get();
+  if (!customerDoc.exists) {
+    throw new Error("Customer profile not found.");
+  }
+
+  // Check #1: Department-Level Command Licenses
+  const maxCommandLicenses = customerDoc.data().maxCommandLicenses || 1;
+  const commandingQuery = incidentsRef
+      .where("customerId", "==", customerId)
+      .where("status", "==", "Active")
+      .where("commanderUid", "!=", null);
+  const commandingSnapshot = await commandingQuery.get();
+
+  if (commandingSnapshot.size >= maxCommandLicenses) {
+    const errorMsg = "All available command licenses for your " +
+      "department are currently in use.";
+    throw new functions.https.HttpsError("permission-denied", errorMsg);
+  }
+
+  // Check #2: Individual User Limit
+  const userIncidentsQuery = incidentsRef
+      .where("customerId", "==", customerId)
+      .where("commanderUid", "==", uid)
+      .where("status", "==", "Active")
+      .limit(1);
+  const userIncidentsSnapshot = await userIncidentsQuery.get();
+  if (!userIncidentsSnapshot.empty) {
+    const errorMsg = "This account is already commanding another " +
+      "active incident. Please close it first.";
+    throw new functions.https.HttpsError("failed-precondition", errorMsg);
+  }
+  // --- END OF GATEKEEPER CHECKS ---
+
+  const ts = new Date();
+  const year = ts.getFullYear();
+  const month = (ts.getMonth() + 1).toString().padStart(2, "0");
+  const day = ts.getDate().toString().padStart(2, "0");
+  const hours = ts.getHours().toString().padStart(2, "0");
+  const minutes = ts.getMinutes().toString().padStart(2, "0");
+
+  let numberToSave = `${year}${month}${day}-${hours}${minutes}`;
+  if (incidentNumber && incidentNumber.trim() !== "") {
+    numberToSave = incidentNumber.trim();
+  }
 
   const newIncidentData = {
     incidentNumber: numberToSave,
     incidentName: incidentName ? incidentName.trim() : null,
-    startTime: timestamp,
+    startTime: ts,
     status: "Active",
     endTime: null,
     customerId,
+    commanderUid: uid,
+    commanderSessionId: sessionId,
   };
   const docRef = await db.collection("incidents").add(newIncidentData);
+  const startTime = newIncidentData.startTime.toISOString();
   return {
     id: docRef.id,
     ...newIncidentData,
-    startTime: timestamp.toISOString(),
+    startTime: startTime,
   };
 }
 
 /**
  * Closes an incident, releasing all units and cleaning up split units.
- * This version is fully lint-compliant with strict max-len rules.
- * @param {object} query The request query parameters.
- * @param {string} customerId The authenticated customer's ID.
+ * @param {object} params The request query parameters.
+ * @param {string} params.incidentId The ID of the incident to close.
+ * @param {object} authContext The authorization context.
  * @return {Promise<object>} A success message.
  */
-async function closeIncident(query, customerId) {
-  const {incidentId} = query;
+async function closeIncident(params, authContext) {
+  const {incidentId} = params;
   if (!incidentId) {
     throw new Error("Incident ID is required.");
   }
 
-  const {ref: incidentRef} =
+  const {uid, customerId} = authContext;
+  const {ref: incidentRef, data: incidentData} =
     await getAndVerifyDoc("incidents", incidentId, customerId);
+
+  if (incidentData.commanderUid !== uid) {
+    const errorMsg = "Only the active commander can close this incident.";
+    throw new functions.https.HttpsError("permission-denied", errorMsg);
+  }
 
   const now = new Date();
   const batch = db.batch();
   const unitsRef = db.collection("units");
 
-  // Find all active assignments for this incident.
-  const assignmentsQuery = db.collection("assignments")
+  const assignQuery = db.collection("assignments")
       .where("customerId", "==", customerId)
       .where("incidentId", "==", incidentId)
       .where("releaseTime", "==", null);
-  const assignmentsSnapshot = await assignmentsQuery.get();
+  const assignSnapshot = await assignQuery.get();
 
-  if (assignmentsSnapshot.empty) {
-    batch.update(incidentRef, {status: "Closed", endTime: now});
+  if (assignSnapshot.empty) {
+    batch.update(incidentRef, {
+      status: "Closed",
+      endTime: now,
+      commanderUid: null,
+      commanderSessionId: null,
+    });
     await batch.commit();
     return {message: "Incident closed successfully."};
   }
 
-  // THE FIX: Break the .map() into a multi-line block to pass max-len.
-  const assignedUnitIds = assignmentsSnapshot.docs.map((doc) => {
-    return doc.data().unitId;
-  });
-
+  const assignedUnitIds = assignSnapshot.docs.map((doc) => doc.data().unitId);
   const assignedUnitsQuery = unitsRef.where(
       admin.firestore.FieldPath.documentId(), "in", assignedUnitIds,
   );
   const assignedUnitsSnapshot = await assignedUnitsQuery.get();
-
-  const parentUnitIdsToReset = new Set();
-  const subunitIdsToDelete = new Set();
+  const parentIds = new Set();
+  const subunitIds = new Set();
 
   assignedUnitsSnapshot.forEach((doc) => {
     const unitData = doc.data();
     if (unitData.parentUnitId) {
-      parentUnitIdsToReset.add(unitData.parentUnitId);
-      subunitIdsToDelete.add(doc.id);
+      parentIds.add(unitData.parentUnitId);
+      subunitIds.add(doc.id);
     }
   });
 
-  // Queue operations to re-form any parent units.
-  if (parentUnitIdsToReset.size > 0) {
+  if (parentIds.size > 0) {
     const parentUnitsQuery = unitsRef.where(
-        admin.firestore.FieldPath.documentId(), "in", [...parentUnitIdsToReset],
+        admin.firestore.FieldPath.documentId(), "in", [...parentIds],
     );
     const parentUnitsSnapshot = await parentUnitsQuery.get();
     parentUnitsSnapshot.forEach((doc) => {
@@ -1018,19 +1675,16 @@ async function closeIncident(query, customerId) {
     });
   }
 
-  // Queue deletion of all temporary subunit documents.
-  subunitIdsToDelete.forEach((unitId) => batch.delete(unitsRef.doc(unitId)));
+  subunitIds.forEach((unitId) => batch.delete(unitsRef.doc(unitId)));
 
-  // Update assignment records and status for all other units.
-  assignmentsSnapshot.forEach((doc) => {
+  assignSnapshot.forEach((doc) => {
     batch.update(doc.ref, {
       releaseTime: now,
       notes: "Released on incident closure",
     });
     const unitId = doc.data().unitId;
-    const isParent = parentUnitIdsToReset.has(unitId);
-    const isSubunit = subunitIdsToDelete.has(unitId);
-    // Only update status if it's a regular unit (not a parent or subunit).
+    const isParent = parentIds.has(unitId);
+    const isSubunit = subunitIds.has(unitId);
     if (!isParent && !isSubunit) {
       const unitDoc = assignedUnitsSnapshot.docs.find((d) => d.id === unitId);
       if (unitDoc && unitDoc.data().status !== "Out of Service") {
@@ -1039,15 +1693,19 @@ async function closeIncident(query, customerId) {
     }
   });
 
-  // Finally, mark the incident itself as closed.
-  batch.update(incidentRef, {status: "Closed", endTime: now});
+  batch.update(incidentRef, {
+    status: "Closed",
+    endTime: now,
+    commanderUid: null,
+    commanderSessionId: null,
+  });
   await batch.commit();
 
-  // THE FIX: Store the long message in a variable to pass max-len.
-  const successMessage =
+  const successMsg =
     "Incident closed, all units released, and split units reformed.";
-  return {message: successMessage};
+  return {message: successMsg};
 }
+
 
 /**
  * Applies a template to an incident for a customer.
@@ -1100,24 +1758,18 @@ async function applyTemplateToIncident(query, customerId) {
 // --- Group & Assignment Management ---
 
 /**
- * Fetches available units and groups them into a flat list under their
- * respective departments, ready for a sortable table view on the front-end.
- * @param {object} query The request query parameters.
+ * Fetches available units and groups them into a flat list.
  * @param {string} customerId The authenticated customer's ID.
- * @return {Promise<object>} An object containing departments, each with a
- *                           flat array of its available units.
+ * @return {Promise<object>} An object containing the assembled hierarchy.
  */
-async function getAllAvailableUnitsGroupedByDept(query, customerId) {
-  // Step 1: Fetch departments and all units for the customer.
+async function getAllAvailableUnitsGroupedByDept(customerId) {
   const [depts, allUnits] = await Promise.all([
-    getDepartments(query.id, customerId),
+    getDepartments(customerId),
     getCollectionData("units", customerId),
   ]);
 
-  // Step 2: Filter for only available units.
   const availableUnits = allUnits.filter((u) => u.status === "Available");
 
-  // Step 3: Group the available units by their `departmentId`.
   const unitsByDeptId = availableUnits.reduce((acc, unit) => {
     const key = unit.departmentId;
     if (!acc[key]) {
@@ -1127,21 +1779,16 @@ async function getAllAvailableUnitsGroupedByDept(query, customerId) {
     return acc;
   }, {});
 
-  // Step 4: Map over departments and then chain a filter.
-  // This block has been meticulously re-formatted to match linter rules.
   const groupedResult = depts
       .map((dept) => {
         const unitsForDept = unitsByDeptId[dept.id] || [];
-
         dept.units = unitsForDept.sort(
             (a, b) => (a.unit || "").localeCompare(b.unit || ""),
         );
-
         return dept;
       })
       .filter((dept) => dept.units.length > 0);
 
-  // Step 5: Return the final object.
   return {departmentsWithUnits: groupedResult};
 }
 
@@ -1258,6 +1905,7 @@ async function createGroupForIncident(query, customerId) {
     customerId,
   };
   const docRef = await db.collection("groups").add(newGroupData);
+
   return {
     id: docRef.id,
     ...newGroupData,
@@ -1740,13 +2388,20 @@ async function startParTimer(query, customerId) {
  * Stops the PAR timer on a group, finds the active log, and updates it
  * with the acknowledgment time and duration.
  * @param {object} query The request query parameters.
+ * @param {string} query.groupId The ID of the group to stop the timer for.
  * @param {string} customerId The authenticated customer's ID.
  * @return {Promise<object>} A success message.
  */
 async function stopParTimer(query, customerId) {
   const {groupId} = query;
-  if (!groupId) throw new Error("Group ID is required.");
-  const {ref: groupRef} = await getAndVerifyDoc("groups", groupId, customerId);
+  if (!groupId) {
+    throw new Error("Group ID is required.");
+  }
+
+  // We only need the 'ref' from this call, not the 'data', so we only
+  // destructure what is necessary to avoid unused variable errors.
+  const {ref: groupRef} =
+    await getAndVerifyDoc("groups", groupId, customerId);
 
   const now = new Date();
   const batch = db.batch();
@@ -1769,12 +2424,8 @@ async function stopParTimer(query, customerId) {
   if (!logSnapshot.empty) {
     const activeLogDoc = logSnapshot.docs[0];
     const startTime = activeLogDoc.data().parStartTime.toDate();
-
-    // --- START: CORRECTED DURATION CALCULATION ---
-    // Break the long line into multiple steps for readability and linting.
     const durationMs = now.getTime() - startTime.getTime();
     const durationSeconds = Math.round(durationMs / 1000);
-    // --- END: CORRECTED DURATION CALCULATION ---
 
     // 3. Update the log with the acknowledgment time and final status.
     batch.update(activeLogDoc.ref, {
@@ -1785,7 +2436,8 @@ async function stopParTimer(query, customerId) {
   } else {
     // This can happen if PAR was started before logging feature was added.
     // It's safe to just log a warning and continue.
-    console.warn(`Could not find an active PAR log for group ID: ${groupId}`);
+    const warnMsg = `Could not find an active PAR log for group ID: ${groupId}`;
+    console.warn(warnMsg);
   }
 
   await batch.commit();
@@ -1920,6 +2572,7 @@ async function splitUnit(query, customerId) {
   });
 
   await batch.commit();
+
   return {message: "Unit split successfully."};
 }
 
@@ -2249,36 +2902,38 @@ async function disbandGroup(query, customerId) {
 /**
  * Deletes an incident and all of its associated data after verifying admin
  * authorization and ensuring the incident is closed.
- * @param {object} query The request query parameters, including the user's
- *     launchId.
- * @param {string} customerId The authenticated customer's ID.
+ * @param {object} query The request query parameters.
+ * @param {object} authContext The full authorization context.
  * @return {Promise<object>} A success message.
  */
-async function deleteIncident(query, customerId) {
-  const {incidentId, adminCode, id: launchId} = query;
-  if (!incidentId || !adminCode || !launchId) {
-    throw new Error("Incident ID, Admin Code, and Launch ID are required.");
+async function deleteIncident(query, authContext) {
+  const {incidentId, adminCode} = query;
+  if (!incidentId || !adminCode) {
+    throw new Error("Incident ID and Admin Code are required.");
   }
 
-  // Step 1: Verify the Admin Code from the USER'S document.
-  const userRef = db.collection("users").doc(launchId);
+  // Use the secure UID from the token to look up the user's profile.
+  const userRef = db.collection("users").doc(authContext.uid);
   const userDoc = await userRef.get();
 
   if (!userDoc.exists || userDoc.data().adminCode !== adminCode) {
     throw new functions.https.HttpsError(
-        "permission-denied", "Invalid Admin Code.");
+        "permission-denied", "Invalid Admin Code.",
+    );
   }
 
-  // Step 2: Verify the incident belongs to the customer and is closed.
+  // Verify the incident belongs to the customer and is closed.
   const {ref: incidentRef, data: incidentData} =
-    await getAndVerifyDoc("incidents", incidentId, customerId);
+    await getAndVerifyDoc("incidents", incidentId, authContext.customerId);
   if (incidentData.status !== "Closed") {
-    const errorMessage =
+    // --- THE FIX IS HERE ---
+    const errorMsg =
       "Cannot delete an active incident. It must be closed first.";
-    throw new Error(errorMessage);
+    throw new Error(errorMsg);
+    // --- END OF FIX ---
   }
 
-  // Step 3: Prepare a batch to delete all associated data.
+  // Prepare a batch to delete all associated data.
   const batch = db.batch();
   const collectionsToDeleteFrom = [
     "groups", "assignments", "parLogs", "unitActionLogs",
@@ -2286,17 +2941,259 @@ async function deleteIncident(query, customerId) {
   for (const collectionName of collectionsToDeleteFrom) {
     const snapshot = await db.collection(collectionName)
         .where("incidentId", "==", incidentId)
-        .where("customerId", "==", customerId)
+        .where("customerId", "==", authContext.customerId)
         .get();
     if (!snapshot.empty) {
       snapshot.forEach((doc) => batch.delete(doc.ref));
     }
   }
 
-  // Step 4: Add the main incident document to the batch and commit.
   batch.delete(incidentRef);
   await batch.commit();
 
-  return {message: "Incident and all associated data deleted successfully."};
+  const successMsg = "Incident and all associated data deleted successfully.";
+  return {message: successMsg};
 }
 
+// ===================================================================
+//
+//  USER MANAGEMENT (ADMIN ONLY)
+//
+// ===================================================================
+
+// Replace this with YOUR actual Firebase Auth UID.
+// You can find this in the Firebase Console -> Authentication -> Users table.
+const SUPER_ADMIN_UID = "WRikDrCVOqTbXHK11mteAD9Fr4t1";
+
+/**
+ * A secure helper to verify that the caller is the designated Super Admin.
+ * @param {object} authContext The context object from a callable function.
+ * @throws {Error} If the caller is not the Super Admin.
+ */
+function verifySuperAdmin(authContext) {
+  if (!authContext || authContext.uid !== SUPER_ADMIN_UID) {
+    const errorMsg =
+      "You must be a Super Admin to perform this action.";
+    throw new functions.https.HttpsError(
+        "permission-denied",
+        errorMsg,
+    );
+  }
+}
+
+/**
+ * An API action to fetch all users from Firebase Auth and Firestore.
+ * @param {object} query The request query parameters (empty).
+ * @param {object} authContext The authorization context of the caller.
+ * @return {Promise<Array<object>>} A list of all users with merged data.
+ */
+async function getAllUsers(query, authContext) {
+  verifySuperAdmin(authContext);
+
+  try {
+    const listUsersResult = await admin.auth().listUsers(1000);
+    const allFirestoreUsers = await db.collection("users").get();
+
+    const firestoreUserMap = new Map();
+    allFirestoreUsers.forEach((doc) => {
+      firestoreUserMap.set(doc.id, doc.data());
+    });
+
+    const combinedUsers = listUsersResult.users.map((userRecord) => {
+      const firestoreProfile = firestoreUserMap.get(userRecord.uid) || {};
+      return {
+        uid: userRecord.uid,
+        email: userRecord.email,
+        disabled: userRecord.disabled,
+        creationTime: userRecord.metadata.creationTime,
+        lastSignInTime: userRecord.metadata.lastSignInTime,
+        ...firestoreProfile,
+      };
+    });
+
+    return combinedUsers;
+  } catch (error) {
+    console.error("Error fetching all users:", error);
+    const errorMsg = "Failed to fetch user list.";
+    throw new functions.https.HttpsError("internal", errorMsg);
+  }
+}
+
+/**
+ * An API action to allow a Super Admin to set a new password for any user.
+ * @param {object} query The request query parameters.
+ * @param {string} query.targetUid The UID of the user to update.
+ * @param {string} query.newPassword The new password to set.
+ * @param {object} authContext The authorization context of the caller.
+ * @return {Promise<object>} A success message.
+ */
+async function setNewPasswordForUser(query, authContext) {
+  verifySuperAdmin(authContext);
+  const {targetUid, newPassword} = query;
+  const passTooShort = !newPassword || newPassword.length < 6;
+  if (!targetUid || passTooShort) {
+    const errorMsg =
+      "UID and a password of at least 6 characters are required.";
+    throw new functions.https.HttpsError("invalid-argument", errorMsg);
+  }
+  try {
+    await admin.auth().updateUser(targetUid, {password: newPassword});
+    const successMsg = `Password updated for UID: ${targetUid}`;
+    return {success: true, message: successMsg};
+  } catch (error) {
+    console.error("Failed to update password:", error);
+    const errorMsg = "Could not update password.";
+    throw new functions.https.HttpsError("internal", errorMsg);
+  }
+}
+
+/**
+ * An API action for a Super Admin to revoke all active refresh tokens for
+ * a user, forcing them to log in again on all devices.
+ * @param {object} query The request query parameters.
+ * @param {string} query.targetUid The UID of the user to sign out.
+ * @param {object} authContext The authorization context of the caller.
+ * @return {Promise<object>} A success message.
+ */
+async function revokeUserSessions(query, authContext) {
+  verifySuperAdmin(authContext);
+  const {targetUid} = query;
+  if (!targetUid) {
+    throw new functions.https.HttpsError(
+        "invalid-argument", "A target UID is required.",
+    );
+  }
+  try {
+    await admin.auth().revokeRefreshTokens(targetUid);
+    const userProfileRef = db.collection("users").doc(targetUid);
+    await userProfileRef.update({
+      tokensValidAfterTime: new Date(),
+    });
+    const successMsg =
+      `Successfully revoked all sessions for user UID: ${targetUid}.`;
+    console.log(successMsg);
+    return {success: true, message: successMsg};
+  } catch (error) {
+    console.error("Failed to revoke refresh tokens:", error);
+    const errorMsg = "Could not revoke user sessions.";
+    throw new functions.https.HttpsError("internal", errorMsg);
+  }
+}
+
+/**
+ * A scheduled function (v2) that runs periodically to clean up abandoned
+ * command sessions. This "smart" cleanup only removes stale sessions that are
+ * actively holding a command lock on an incident. This releases the lock and
+ * prevents user lockouts. Standby sessions are left alone.
+ */
+exports.cleanupstalecommandsessions = onSchedule(
+    "every 1 hours", async (event) => {
+      console.log("Running stale command session cleanup...");
+      const now = new Date();
+      // A session is considered stale if not sending a heartbeat for 2 hours.
+      const twoHoursAgo = 2 * 60 * 60 * 1000;
+      const staleThreshold = new Date(now.getTime() - twoHoursAgo);
+
+      const sessionsRef = db.collection("sessions");
+      const staleSessionsQuery = sessionsRef
+          .where("lastActive", "<", staleThreshold);
+      const staleSessionsSnapshot = await staleSessionsQuery.get();
+
+      if (staleSessionsSnapshot.empty) {
+        console.log("No stale sessions found. Cleanup complete.");
+        return null;
+      }
+
+      const staleSessionIds = staleSessionsSnapshot.docs.map((doc) => doc.id);
+      const investigationMsg =
+        `Found ${staleSessionIds.length} stale sessions to investigate.`;
+      console.log(investigationMsg);
+
+      const incidentsRef = db.collection("incidents");
+      const lockedIncidentsQuery = incidentsRef
+          .where("status", "==", "Active")
+          .where("commanderSessionId", "in", staleSessionIds);
+
+      const lockedIncidentsSnapshot = await lockedIncidentsQuery.get();
+
+      if (lockedIncidentsSnapshot.empty) {
+        const noActionMsg =
+          "No incidents are locked by stale sessions. No action needed.";
+        console.log(noActionMsg);
+        return null;
+      }
+
+      const batch = db.batch();
+      const sessionsToDelete = new Set();
+
+      lockedIncidentsSnapshot.forEach((doc) => {
+        const incident = doc.data();
+        const releaseMsg = `Incident ${doc.id} is locked by stale session ` +
+                           `${incident.commanderSessionId}. Releasing lock.`;
+        console.log(releaseMsg);
+
+        batch.update(doc.ref, {
+          commanderUid: null,
+          commanderSessionId: null,
+        });
+
+        sessionsToDelete.add(incident.commanderSessionId);
+      });
+
+      sessionsToDelete.forEach((sessionId) => {
+        console.log(`Deleting stale session document: ${sessionId}`);
+        const sessionRef = sessionsRef.doc(sessionId);
+        batch.delete(sessionRef);
+      });
+
+      await batch.commit();
+
+      const successMsg = "Released locks on " +
+        `${lockedIncidentsSnapshot.size} incidents and deleted ` +
+        `${sessionsToDelete.size} sessions.`;
+      console.log(successMsg);
+      return null;
+    });
+
+/**
+ * A scheduled function (v2) that runs daily as a "janitor" to clean up
+ * any session documents that are very old and truly abandoned, regardless
+ * of their command status. This is for long-term database hygiene.
+ */
+exports.cleanupoldsessions = onSchedule(
+    // Runs once a day at a quiet time, like 3:00 AM server time.
+    "every day 03:00", async (event) => {
+      console.log("Running daily old session cleanup job...");
+
+      const now = new Date();
+      // A session is considered "old" if it hasn't been active in 60 days.
+      // This is a very safe threshold.
+      const sixtyDaysInMs = 60 * 24 * 60 * 60 * 1000;
+      const oldThreshold = new Date(now.getTime() - sixtyDaysInMs);
+
+      const sessionsRef = db.collection("sessions");
+      const oldSessionsQuery = sessionsRef
+          .where("lastActive", "<", oldThreshold)
+          .limit(400); // Limit to 400 deletes per run to stay within limits.
+
+      const snapshot = await oldSessionsQuery.get();
+
+      if (snapshot.empty) {
+        console.log("No old sessions found to delete. Job complete.");
+        return null;
+      }
+
+      console.log(`Found ${snapshot.size} old sessions to delete.`);
+
+      const batch = db.batch();
+      snapshot.forEach((doc) => {
+        batch.delete(doc.ref);
+      });
+
+      await batch.commit();
+
+      const successMsg = "Successfully deleted " +
+        `${snapshot.size} old session documents.`;
+      console.log(successMsg);
+      return null;
+    });

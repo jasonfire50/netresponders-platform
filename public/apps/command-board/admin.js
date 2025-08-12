@@ -14,8 +14,79 @@
 //
 // ===================================================================
 
+
 /**
- * Renders the entire Admin view and its sub-tabs into the container.
+ * Sets up a single, delegated event listener for the entire admin view.
+ * This is more efficient and robust than attaching listeners to individual
+ * elements, as it works automatically for any content that is re-rendered.
+ */
+function setupAdminEventListeners() {
+    const container = document.getElementById('adminView');
+    // Ensure this is only run once to prevent duplicate listeners.
+    if (!container || container.dataset.listenersAttached === 'true') {
+        return;
+    }
+    container.dataset.listenersAttached = 'true';
+
+    // --- DELEGATED CLICK LISTENER ---
+    container.addEventListener('click', (event) => {
+        const target = event.target;
+        const button = target.closest('button');
+        if (!button) return; // Ignore clicks that aren't on a button
+
+        // Department Actions
+        if (button.id === 'addDepartmentBtn') openDepartmentModal();
+        if (button.matches('.js-edit-dept')) openDepartmentModal(button.dataset.id);
+        if (button.matches('.js-delete-dept')) handleDeleteDepartmentClick(button.dataset.id, button.dataset.name);
+
+        // Unit Actions
+        if (button.id === 'addUnitBtn') openUnitModal();
+        if (button.matches('.js-edit-unit')) openUnitModal(button.dataset.id);
+        if (button.matches('.js-delete-unit')) handleDeleteUnitClick(button.dataset.id, button.dataset.name);
+
+        // Unit Type Actions
+        if (button.id === 'addUnitTypeBtn') openUnitTypeModal();
+        if (button.matches('.js-edit-type')) openUnitTypeModal(button.dataset.id);
+        if (button.matches('.js-delete-type')) handleDeleteUnitTypeClick(button.dataset.id, button.dataset.name);
+
+        // Library Actions (Templates & Common Groups)
+        if (button.id === 'addTemplateBtn') openTemplateModal();
+        if (button.matches('.js-edit-template')) openTemplateModal(button.dataset.id);
+        if (button.matches('.js-delete-template')) handleDeleteTemplateClick(button.dataset.id, button.dataset.name);
+        if (button.id === 'addCommonGroupBtn') openCommonGroupModal();
+        if (button.matches('.js-edit-cgroup')) openCommonGroupModal(button.dataset.id);
+        if (button.matches('.js-delete-cgroup')) handleDeleteCommonGroupClick(button.dataset.id, button.dataset.name);
+        if (button.id === 'addTemplateGroupBtn') addGroupToTemplateModalList();
+
+        // Incident Management Actions
+        if (button.id === 'deleteIncidentBtn') handleDeleteIncidentClick();
+
+        // Settings Actions
+        if (button.id === 'saveSettingsBtn') handleSaveSettings();
+
+        // Table Sorting Header
+        const sortableHeader = target.closest('.sortable-header-admin');
+        if (sortableHeader) {
+            handleSortAdminUnits(sortableHeader);
+        }
+    });
+
+    // --- DELEGATED CHANGE LISTENER ---
+    container.addEventListener('change', (event) => {
+        const target = event.target;
+        // Department filter for units
+        if (target.id === 'adminUnitDeptFilter') {
+            loadAdminUnits(target.value);
+        }
+        // Incident selection
+        if (target.id === 'closedIncidentSelect') {
+            handleAdminIncidentSelect();
+        }
+    });
+}
+
+/**
+ * Renders the entire Admin view and calls the setup for its delegated listener.
  * @param {HTMLElement} container The container element for the view.
  * @param {object} data The initial data from appState.
  */
@@ -42,52 +113,30 @@ function renderAdminView(container, data) {
       <div class="tab-pane fade" id="adminUnitTypes" role="tabpanel">
         <div class="mt-3"><h4>Unit Types</h4><p class="text-muted small">Define unit types, e.g., Engine, Ladder.</p><button class="btn btn-success mb-2" id="addUnitTypeBtn">Add Unit Type</button><div id="unitTypesTableContainer" class="table-responsive"></div></div>
       </div>
-
       <div class="tab-pane fade" id="adminTemplates" role="tabpanel">
         <div class="mt-3"><h4>Incident Templates</h4><p class="text-muted small">Combine groups into templates.</p><button class="btn btn-success mb-2" id="addTemplateBtn">Add Template</button><div id="templatesTableContainer" class="table-responsive"></div><hr class="my-4"><h4>Common Group Definitions</h4><p class="text-muted small">Building blocks for templates.</p><button class="btn btn-success mb-2" id="addCommonGroupBtn">Add Group</button><div id="commonGroupsTableContainer" class="table-responsive"></div></div>
       </div>
-
-      <!-- START: NEW INCIDENT MANAGEMENT TAB PANE -->
       <div class="tab-pane fade" id="adminIncidents" role="tabpanel">
-        <div class="mt-3">
-            <h4>Incident Management</h4>
-            <p class="text-muted small">Select a closed incident to manage its data.</p>
-            <div class="form-row align-items-end">
-                <div class="form-group col-md-6">
-                    <label for="closedIncidentSelect">Select Closed Incident:</label>
-                    <select id="closedIncidentSelect" class="form-control"></select>
-                </div>
-            </div>
-            <hr>
-            <div id="incidentDetailsDisplay" class="mb-3" style="display:none;">
-                <h5>Incident Details</h5>
-                <div id="incidentDetailsContent" class="p-3 border rounded bg-light"></div>
-                <button id="deleteIncidentBtn" class="btn btn-danger mt-3">
-                    <i class="fas fa-exclamation-triangle"></i> Permanently Delete Incident
-                </button>
-            </div>
-        </div>
+        <div class="mt-3"><h4>Incident Management</h4><p class="text-muted small">Select a closed incident to manage its data.</p><div class="form-row align-items-end"><div class="form-group col-md-6"><label for="closedIncidentSelect">Select Closed Incident:</label><select id="closedIncidentSelect" class="form-control"></select></div></div><hr><div id="incidentDetailsDisplay" class="mb-3" style="display:none;"><h5>Incident Details</h5><div id="incidentDetailsContent" class="p-3 border rounded bg-light"></div><button id="deleteIncidentBtn" class="btn btn-danger mt-3"><i class="fas fa-exclamation-triangle"></i> Permanently Delete Incident</button></div></div>
       </div>
-      <!-- END: NEW INCIDENT MANAGEMENT TAB PANE -->
-
       <div class="tab-pane fade" id="adminSettings" role="tabpanel">
         <div class="mt-3"><h4>Global Settings</h4><div id="settingsContainer"></div></div>
       </div>
     </div>`;
 
   container.innerHTML = adminHTML;
-  attachAdminTabListeners(data);
+  // THE FIX: Call the new, single, delegated listener setup function.
+  setupAdminEventListeners();
+  // Call the function that handles the tab-switching logic.
+  attachAdminTabLogic();
 }
 
 /**
- * Attaches event listeners for the Admin view's interactive elements.
- * This FINAL version wires up all buttons, the department filter,
- * and the new sortable table headers for the units list.
+ * Attaches the logic for the Admin view's Bootstrap tabs. This function
+ * ONLY handles the tab switching, as all button clicks are now managed by
+ * the delegated event listener.
  */
-function attachAdminTabListeners() {
-  const adminTabList = document.getElementById('adminTab');
-  if (!adminTabList) return;
-
+function attachAdminTabLogic() {
   // Handles switching between the main admin tabs (Departments, Units, etc.)
   $('#adminTab a[data-toggle="tab"]').on('shown.bs.tab', function (e) {
     if (!appState.isAuthenticated) return;
@@ -101,25 +150,6 @@ function attachAdminTabListeners() {
       case "#adminSettings": renderSettingsView(appState.initialData.settings || {}); break;
     }
   });
-
-  const adminContainer = document.getElementById('adminView');
-  if (adminContainer) {
-    // Main event listener for the Admin panel.
-    adminContainer.addEventListener('click', (event) => {
-      const sortableHeader = event.target.closest('.sortable-header-admin');
-      if (sortableHeader) {
-        // Trigger the sorting function if a header is clicked.
-        handleSortAdminUnits(sortableHeader);
-      }
-    });
-
-    // Listener for the department filter dropdown.
-    adminContainer.addEventListener('change', (event) => {
-      if (event.target.id === 'adminUnitDeptFilter') {
-        loadAdminUnits(event.target.value);
-      }
-    });
-  }
 
   // Load the default tab's data on initial view.
   if (appState.isAuthenticated) {

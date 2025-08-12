@@ -1,10 +1,21 @@
 /**
- * command-board.js
- * This file contains all logic for the main Command Board view.
- *
- * This version includes the "smart memory" feature for the Available Units
- * accordion, preventing it from collapsing after user actions.
+ * command-board.js - DEFINITIVE STABLE VERSION
+ * This file contains all logic for the main Command Board view. It implements
+ * the complete, stable architecture for session management, tiered licensing,
+ * real-time updates, and robust event handling via a Delegated Listener Model.
  */
+
+// ===================================================================
+//
+//  GLOBAL LISTENERS & STATE
+//
+// ===================================================================
+
+let mainIncidentListener = null;
+let commandRequestListener = null;
+let myRequestStatusListener = null;
+let groupsListener = null;
+let assignmentsListener = null;
 
 // ===================================================================
 //
@@ -35,6 +46,7 @@ function formatDuration(totalMinutes) {
   }
 }
 
+
 // ===================================================================
 //
 //  CORE RENDERING AND DATA LOADING
@@ -42,12 +54,28 @@ function formatDuration(totalMinutes) {
 // ===================================================================
 
 /**
- * Renders the static shell for the Command Board view and initiates loading.
+ * A safe UI update function. It checks if the command board is visible and
+ * not in an active incident. If so, it re-renders the incident control
+ * panel with the latest data from the appState.
+ */
+function updateIncidentDropdownIfVisible() {
+  if (appState.currentViewId !== 'commandBoardView' || appState.currentIncident) return;
+  const sidebar = document.getElementById('commandSidebar');
+  if (sidebar) {
+    const incidentControl = sidebar.querySelector('.card');
+    if (incidentControl) {
+      incidentControl.outerHTML = renderIncidentControl(appState.initialData.activeIncidents);
+    }
+  }
+}
+
+/**
+ * Renders the static shell for the Command Board view and attaches its single delegated listener.
  */
 function renderCommandBoardView(container, data) {
   if (!container) return;
-
   container.innerHTML = `
+    <div id="view-only-banner" class="alert alert-info text-center" style="display:none; font-weight: bold;">You are in View-Only Mode</div>
     <div class="row flex-nowrap">
       <div class="col-md-3" id="commandSidebar">
         <div class="sidebar">
@@ -60,14 +88,15 @@ function renderCommandBoardView(container, data) {
     </div>
   `;
 
-  const lastActiveId = sessionStorage.getItem("fcb_lastActiveIncidentId");
-  const select = document.getElementById("activeIncidentsSelect");
+  setupCommandBoardEventListeners();
 
-  if (lastActiveId && select && select.querySelector(`option[value="${lastActiveId}"]`)) {
-    select.value = lastActiveId;
-    const selectedOption = select.options[select.selectedIndex];
-    const incidentData = JSON.parse(selectedOption.dataset.incidentJson);
-    loadAndDisplayIncident(incidentData);
+  const incidentSelect = document.getElementById("activeIncidentsSelect");
+  const storageKey = `fcb_lastActiveIncidentId_${appState.currentUser.uid}`;
+  const lastActiveId = sessionStorage.getItem(storageKey);
+
+  if (lastActiveId && incidentSelect.querySelector(`option[value="${lastActiveId}"]`)) {
+    incidentSelect.value = lastActiveId;
+    handleActiveIncidentSelect();
   } else {
     clearIncidentDetails();
     loadAvailableUnits();
@@ -75,54 +104,7 @@ function renderCommandBoardView(container, data) {
 }
 
 /**
- * The master function to fully load all data for an incident and render it.
- */
-async function loadAndDisplayIncident(incidentData) {
-    appState.currentIncident = incidentData;
-    sessionStorage.setItem("fcb_lastActiveIncidentId", incidentData.id);
-
-    showLoader();
-    try {
-        await Promise.all([
-            loadGroupsForCurrentIncident(),
-            loadSplitUnits(),
-            loadAvailableUnits(),
-        ]);
-        renderIncidentContent();
-    } catch (error) {
-        showError(error.message);
-        clearIncidentDetails();
-    } finally {
-        hideLoader();
-    }
-}
-
-/**
- * Fetches groups for the current incident and saves them to the appState.
- */
-async function loadGroupsForCurrentIncident() {
-    if (!appState.currentIncident) return;
-    try {
-        const response = await callApi("getGroupsForIncident", {
-            id: appState.launchId,
-            incidentId: appState.currentIncident.id,
-        });
-        if (response.success) {
-            if (appState.currentIncident) {
-                appState.currentIncident.groups = response.data;
-            }
-        } else {
-            showError(response.message);
-            if (appState.currentIncident) appState.currentIncident.groups = [];
-        }
-    } catch (error) {
-        showError(error.message);
-        if (appState.currentIncident) appState.currentIncident.groups = [];
-    }
-}
-
-/**
- * Renders the main content area after all data has been loaded into appState.
+ * Renders the main content area for an active incident.
  */
 function renderIncidentContent() {
   const incident = appState.currentIncident;
@@ -131,7 +113,7 @@ function renderIncidentContent() {
     clearIncidentDetails();
     return;
   }
-
+  const isDisabled = appState.isViewOnly ? 'disabled' : '';
   container.innerHTML = `
     <div class="main-content">
       <div id="current-incident-summary" class="d-flex flex-wrap align-items-center mb-2 p-2 border rounded bg-light">
@@ -139,9 +121,16 @@ function renderIncidentContent() {
         <span class="text-muted mr-3">${incident.incidentName || ""}</span>
         <span class="mr-3">Started: ${new Date(incident.startTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
         <span class="font-weight-bold mr-3">${incident.status}</span>
+        <div class="btn-group ml-auto">
+          <button id="incidentViewRefreshBtn" class="btn btn-secondary btn-sm" title="Back to Incident List">
+            <i class="fas fa-list-ul"></i> Back to List
+          </button>
+          <button id="closeIncidentBtn" class="btn btn-danger btn-sm" ${isDisabled}>
+            Close Incident
+          </button>
+        </div>
       </div>
       <div id="incident-content-area">
-        <hr class="mt-0 mb-2">
         <div class="card shadow-sm mb-3">
           <div class="card-header"><h5>Add Groups to Incident</h5></div>
           <div class="card-body">
@@ -149,22 +138,22 @@ function renderIncidentContent() {
               <div class="col-md-4 form-group">
                 <label><small><strong>1. Apply Template</strong></small></label>
                 <div class="input-group">
-                  <select id="templateSelect" class="form-control form-control-sm"></select>
+                  <select id="templateSelect" class="form-control form-control-sm" ${isDisabled}></select>
                   <div class="input-group-append">
-                    <button class="btn btn-info btn-sm" id="applyTemplateBtn">Apply</button>
+                    <button class="btn btn-info btn-sm" id="applyTemplateBtn" ${isDisabled}>Apply</button>
                   </div>
                 </div>
               </div>
               <div class="col-md-4 form-group">
                 <label><small><strong>2. Add Common Group</strong></small></label>
-                <select id="commonGroupSelect" class="form-control form-control-sm"></select>
+                <select id="commonGroupSelect" class="form-control form-control-sm" ${isDisabled}></select>
               </div>
               <div class="col-md-4 form-group">
                 <label><small><strong>3. Add Custom Group</strong></small></label>
                 <div class="input-group">
-                  <input type="text" id="newGroupName" class="form-control form-control-sm" placeholder="Type Custom Name">
+                  <input type="text" id="newGroupName" class="form-control form-control-sm" placeholder="Type Custom Name" ${isDisabled}>
                   <div class="input-group-append">
-                    <button class="btn btn-success btn-sm" id="addGroupBtn">Add</button>
+                    <button class="btn btn-success btn-sm" id="addGroupBtn" ${isDisabled}>Add</button>
                   </div>
                 </div>
               </div>
@@ -173,8 +162,8 @@ function renderIncidentContent() {
         </div>
         <div class="d-flex justify-content-between align-items-center mb-2">
           <h4>Command Groups</h4>
-          <div>
-            <button id="reorderGroupsBtn" class="btn btn-outline-secondary btn-sm">
+          <div id="reorder-buttons-container">
+            <button id="reorderGroupsBtn" class="btn btn-outline-secondary btn-sm" ${isDisabled}>
                 <i class="fas fa-sort"></i> Reorder Groups
             </button>
             <button id="cancelReorderBtn" class="btn btn-danger btn-sm" style="display: none;">
@@ -190,6 +179,20 @@ function renderIncidentContent() {
   populateCommonGroupsDropdown(appState.initialData.commonGroups || []);
   renderGroupCards(appState.currentIncident.groups || []);
   setIncidentActiveUI(true);
+}
+
+/**
+ * Renders all group cards and initializes their client-side PAR timers.
+ */
+function renderGroupCards(allGroups) {
+  const container = document.getElementById("groupsContainer");
+  if (!container) return;
+  if (!allGroups || allGroups.length === 0) {
+    container.innerHTML = '<p class="text-muted col-12">No groups created yet.</p>';
+    return;
+  }
+  container.innerHTML = buildGroupHierarchy(allGroups).map(node => renderGroupNode(node, new Map(allGroups.map(g => [g.id, g.groupName])))).join('');
+  initializeParTimers(allGroups);
 }
 
 /**
@@ -251,35 +254,10 @@ function renderGroupNode(groupNode, groupNameMap) {
 }
 
 /**
- * Renders all group cards by first building a hierarchy.
- */
-function renderGroupCards(allGroups) {
-  const container = document.getElementById("groupsContainer");
-  if (!container) return;
-
-  if (!allGroups || allGroups.length === 0) {
-    container.innerHTML = '<p class="text-muted col-12">No groups have been created for this incident yet.</p>';
-    return;
-  }
-
-  const groupNameMap = new Map(allGroups.map(g => [g.id, g.groupName]));
-  const groupTree = buildGroupHierarchy(allGroups);
-  container.innerHTML = groupTree.map(groupNode => renderGroupNode(groupNode, groupNameMap)).join('');
-
-  allGroups.forEach(group => {
-    if (appState.selectedGroupUnits[group.id]?.size > 0) {
-      updateGroupCardActions(group.id, allGroups);
-    }
-  });
-
-  initializeParTimers(allGroups);
-}
-
-/**
- * Renders the HTML for a single group card.
+ * Renders the HTML for a single group card, disabling controls if in view-only mode.
  */
 function renderSingleGroupCard(group, groupMap) {
-    if (group.units && group.units.length > 0) {
+  if (group.units && group.units.length > 0) {
     group.units.sort((a, b) => {
       const isASupervisor = a.unitId === group.groupSupervisorUnitId;
       const isBSupervisor = b.unitId === group.groupSupervisorUnitId;
@@ -292,13 +270,14 @@ function renderSingleGroupCard(group, groupMap) {
     });
   }
 
+  const isDisabled = appState.isViewOnly ? 'disabled' : '';
   const parStatus = group.parStatus || "Idle";
   let parButtonClass = "par-btn-idle";
   if (parStatus === "Active") parButtonClass = "par-btn-active";
   if (parStatus === "Expired") parButtonClass = "par-btn-expired";
   const parBtnData = `data-group-id="${group.id}" data-par-status="${parStatus}"`;
-  const parButtonHtml = `<button class="btn par-btn ${parButtonClass} js-par-btn" ${parBtnData}>PAR</button>`;
-  const multiUnitActionsHtml = `
+  const parButtonHtml = `<button class="btn par-btn ${parButtonClass} js-par-btn" ${parBtnData} ${isDisabled}>PAR</button>`;
+  const multiUnitActionsHtml = appState.isViewOnly ? '' : `
     <div class="multi-unit-actions mt-2" style="display: none;">
       <div class="d-flex justify-content-between align-items-center bg-light p-1 rounded">
         <span class="multi-unit-selection-count small font-weight-bold pl-2"></span>
@@ -321,6 +300,7 @@ function renderSingleGroupCard(group, groupMap) {
     const supText = `Supervisor: <strong>${group.groupSupervisorName}</strong>`;
     supervisorHtml = `<div style="font-size: 0.8em;">${supText}${elapsedTimeHtml}</div>`;
   }
+
   const benchmarks = [
     { name: "Fire", status: group.fireBenchmark || "Pending" },
     { name: "Search", status: group.searchBenchmark || "Pending" },
@@ -330,7 +310,7 @@ function renderSingleGroupCard(group, groupMap) {
     const btnClass = bm.status === 'Completed' ? 'btn-success' : bm.status === 'Started' ? 'btn-warning' : 'btn-light';
     const benchmarkName = `${bm.name.toLowerCase()}Benchmark`;
     const btnData = `data-group-id="${group.id}" data-benchmark-name="${benchmarkName}" data-current-status="${bm.status}"`;
-    return `<button class="btn btn-sm ${btnClass} py-0 px-2 js-benchmark-btn" ${btnData}>${bm.name}</button>`;
+    return `<button class="btn btn-sm ${btnClass} py-0 px-2 js-benchmark-btn" ${btnData} ${isDisabled}>${bm.name}</button>`;
   }).join('');
 
   const unitsHtml = (group.units && group.units.length > 0) ? group.units.map(unit => {
@@ -342,54 +322,575 @@ function renderSingleGroupCard(group, groupMap) {
     const checkboxId = `chk-group-unit-${unit.unitId}`;
     const isChecked = appState.selectedGroupUnits[group.id]?.has(unit.unitId) ? 'checked' : '';
     const supervisorBtnData = `data-group-id="${group.id}" data-unit-id="${unit.unitId}"`;
-    const supervisorButton = isSupervisor
-      ? `<button class="btn btn-sm btn-warning py-0 px-1 js-clear-supervisor" data-group-id="${group.id}" title="Clear Supervisor">Clear Sup.</button>`
-      : `<button class="btn btn-sm btn-outline-warning py-0 px-1 js-set-supervisor" ${supervisorBtnData} title="Set as Supervisor">Set Sup.</button>`;
-    const splitButtonHtml = !isSubunit
-      ? `<button class="btn btn-sm btn-outline-info py-0 px-1 js-split-unit" ${supervisorBtnData} title="Split Unit"><i class="fas fa-code-branch"></i></button>`
-      : '';
-    const releaseButtonHtml = !isSubunit
-      ? `<button class="btn btn-sm btn-outline-success py-0 px-1 js-release-unit" data-id="${unit.id}" data-name="${safeUnitName}" title="Release Unit"><i class="fas fa-check-circle"></i></button>`
-      : '';
-    const supervisorBadgeHtml = isSupervisor
-      ? `<span class="badge badge-warning badge-pill ml-2" title="Group Supervisor">Sup</span>`
-      : '';
-    const checkboxData = `onchange="handleGroupUnitCheckboxChange(this)" data-unit-id="${unit.unitId}" data-group-id="${group.id}" ${isChecked}`;
+    const supervisorButton = isSupervisor ?
+      `<button class="btn btn-sm btn-warning py-0 px-1 js-clear-supervisor" data-group-id="${group.id}" title="Clear Supervisor" ${isDisabled}>Clear Sup.</button>` :
+      `<button class="btn btn-sm btn-outline-warning py-0 px-1 js-set-supervisor" ${supervisorBtnData} title="Set as Supervisor" ${isDisabled}>Set Sup.</button>`;
+    const splitButtonHtml = !isSubunit ?
+      `<button class="btn btn-sm btn-outline-info py-0 px-1 js-split-unit" ${supervisorBtnData} title="Split Unit" ${isDisabled}><i class="fas fa-code-branch"></i></button>` :
+      '';
+    const releaseButtonHtml = !isSubunit ?
+      `<button class="btn btn-sm btn-outline-success py-0 px-1 js-release-unit" data-id="${unit.unitId}" data-name="${safeUnitName}" title="Release Unit" ${isDisabled}><i class="fas fa-check-circle"></i></button>` :
+      '';
+    const supervisorBadgeHtml = isSupervisor ?
+      `<span class="badge badge-warning badge-pill ml-2" title="Group Supervisor">Sup</span>` :
+      '';
+    const checkboxData = `data-unit-id="${unit.unitId}" data-group-id="${group.id}" ${isChecked}`;
+    const checkboxHtml = appState.isViewOnly ? '' : `<input type="checkbox" class="mr-2 group-unit-checkbox" id="${checkboxId}" ${checkboxData}>`;
     const labelHtml = `<label for="${checkboxId}" class="mb-0"><strong class="mr-2">${unit.unit}</strong>${supervisorBadgeHtml}<small class="text-muted ml-2">(${elapsedTimeDisplay})</small></label>`;
-    const checkboxHtml = `<input type="checkbox" class="mr-2 group-unit-checkbox" id="${checkboxId}" ${checkboxData}>`;
+    const singleUnitActions = appState.isViewOnly ? '' : `
+      <div class="single-unit-actions">
+        <div class="btn-group">
+          ${supervisorButton}
+          ${splitButtonHtml}
+          <button class="btn btn-sm btn-outline-secondary py-0 px-1 js-move-unit" data-id="${unit.unitId}" data-name="${safeUnitName}" title="Move Unit"><i class="fas fa-arrows-alt"></i></button>
+          ${releaseButtonHtml}
+        </div>
+      </div>`;
     return `
       <div class="unit-in-group list-group-item d-flex justify-content-between align-items-center py-1 px-2">
         <div class="d-flex align-items-center">${checkboxHtml}${labelHtml}</div>
-        <div class="single-unit-actions">
-          <div class="btn-group">
-            ${supervisorButton}${splitButtonHtml}
-            <button class="btn btn-sm btn-outline-secondary py-0 px-1 js-move-unit" data-id="${unit.id}" data-name="${safeUnitName}" title="Move Unit"><i class="fas fa-arrows-alt"></i></button>
-            ${releaseButtonHtml}
-          </div>
-        </div>
+        ${singleUnitActions}
       </div>`;
   }).join('') : '<p class="text-muted p-2 no-units-assigned"><em>No units assigned.</em></p>';
 
   let reportsToHtml = '';
   if (group.parentGroupId) {
     const parentName = groupMap.get(group.parentGroupId) || 'Unknown';
-    const clearParentBtn = `<button class="btn-clear-parent js-clear-parent" title="Remove from Group" data-child-group-id="${group.id}">×</button>`;
+    const clearParentBtn = appState.isViewOnly ? '' : `<button class="btn-clear-parent js-clear-parent" title="Remove from Group" data-child-group-id="${group.id}">×</button>`;
     reportsToHtml = `<div class="reports-to-bar d-flex justify-content-between align-items-center"><span>Reports to: <strong>${parentName}</strong></span>${clearParentBtn}</div>`;
   }
-  const assignParentButton = !group.parentGroupId ? `<button class="btn btn-sm btn-outline-info py-0 px-1 js-assign-parent" data-group-id="${group.id}" title="Assign to Group"><i class="fas fa-sitemap"></i></button>` : '';
+  const assignParentButton = appState.isViewOnly || group.parentGroupId ? '' : `<button class="btn btn-sm btn-outline-info py-0 px-1 js-assign-parent" data-group-id="${group.id}" title="Assign to Group"><i class="fas fa-sitemap"></i></button>`;
   const safeGroupName = group.groupName.replace(/'/g, "\\'");
   const disbandBtnData = `data-group-id="${group.id}" data-group-name="${safeGroupName}"`;
-  const disbandButton = `<button class="btn btn-sm btn-outline-secondary py-0 px-1 js-disband-group" ${disbandBtnData} title="Disband Group"><i class="fas fa-trash"></i></button>`;
+  const disbandButton = appState.isViewOnly ? '' : `<button class="btn btn-sm btn-outline-secondary py-0 px-1 js-disband-group" ${disbandBtnData} title="Disband Group"><i class="fas fa-trash"></i></button>`;
+
   const headerContent = `<div class="d-flex justify-content-between align-items-start"><div><h5 class="card-title mb-0">${group.groupName}</h5>${supervisorHtml}</div>${parButtonHtml}</div>${reportsToHtml}${multiUnitActionsHtml}`;
   const footerContent = `<div class="d-flex justify-content-between align-items-center w-100"><div style="flex-basis: 60px;" class="d-flex">${assignParentButton}</div><div class="btn-group btn-group-sm mx-auto">${benchmarkButtonsHtml}</div><div style="flex-basis: 60px;" class="d-flex justify-content-end">${disbandButton}</div></div>`;
   const headerStyle = `style="background-color: ${group.headerColor || '#6c757d'}; color: ${getContrastYIQ(group.headerColor)};"`;
-  const cardData = `id="group-card-${group.id}" data-group-id="${group.id}" data-is-child="${!!group.parentGroupId}" onclick="handleGroupCardClick('${group.id}')"`;
-  return `<div class="card shadow-sm group-card" ${cardData}><div class="card-header" ${headerStyle}>${headerContent}</div><div class="card-body p-0"><div class="list-group list-group-flush">${unitsHtml}</div></div><div class="card-footer text-center p-1">${footerContent}</div></div>`;
+  const cardData = `id="group-card-${group.id}" data-group-id="${group.id}" data-is-child="${!!group.parentGroupId}"`;
+
+  return `<div class="card shadow-sm group-card" ${cardData} onclick="handleGroupCardClick('${group.id}')"><div class="card-header" ${headerStyle}>${headerContent}</div><div class="card-body p-0"><div class="list-group list-group-flush">${unitsHtml}</div></div><div class="card-footer text-center p-1">${footerContent}</div></div>`;
 }
 
 // ===================================================================
 //
-//  EVENT HANDLERS AND UI LOGIC
+//  EVENT BINDING (DEFINITIVE ARCHITECTURE)
+//
+// ===================================================================
+
+/**
+ * FINAL ARCHITECTURE: Sets up a single, delegated event listener for the
+ * entire command board view. This is more efficient and robust than attaching
+ * listeners to individual elements, as it works automatically for any
+ * content that is re-rendered.
+ */
+function setupCommandBoardEventListeners() {
+    const container = document.getElementById('commandBoardView');
+    if (!container || container.dataset.listenersAttached === 'true') {
+        return; // Ensure this is only run once.
+    }
+    container.dataset.listenersAttached = 'true';
+
+    // --- CLICK LISTENER ---
+    container.addEventListener('click', (event) => {
+        const target = event.target;
+        const button = target.closest('button');
+        if (!button) return; // Ignore clicks that aren't on a button
+
+        // Sidebar Actions
+        if (button.id === 'startNewIncidentBtn') handleStartNewIncident();
+        if (button.id === 'takeCommandBtn') handleTakeCommandClick();
+        if (button.id === 'viewOnlyBtn') handleViewOnlyClick();
+
+        // Main Incident Content Actions
+        if (button.id === 'incidentViewRefreshBtn') handleManualRefresh();
+        if (button.id === 'closeIncidentBtn') handleCloseIncident();
+        if (button.id === 'applyTemplateBtn') handleApplyTemplate();
+        if (button.id === 'addGroupBtn') handleAddGroup();
+        if (button.id === 'reorderGroupsBtn') toggleReorderMode();
+        if (button.id === 'cancelReorderBtn') toggleReorderMode();
+
+        // Group Card and Unit Actions (using class selectors)
+        if (button.matches('.js-set-supervisor')) handleSetSupervisor(button.dataset.groupId, button.dataset.unitId);
+        if (button.matches('.js-clear-supervisor')) handleClearSupervisor(button.dataset.groupId);
+        if (button.matches('.js-split-unit')) splitUnit(button);
+        if (button.matches('.js-release-unit')) handleReleaseUnitClick(button.dataset.id, button.dataset.name);
+        if (button.matches('.js-move-unit')) handleMoveUnitClick(button.dataset.id, button.dataset.name);
+        if (button.matches('.js-benchmark-btn')) handleBenchmarkClick(button.dataset.groupId, button.dataset.benchmarkName, button.dataset.currentStatus);
+        if (button.matches('.js-par-btn')) handleParButtonClick(button);
+        if (button.matches('.js-disband-group')) handleDisbandGroupClick(button);
+        if (button.matches('.js-assign-parent')) handleAssignParentClick(button);
+        if (button.matches('.js-clear-parent')) handleClearParentClick(button);
+        if (button.matches('.js-unsplit-unit')) openUnsplitUnitModal(button);
+
+        // Multi-Unit Actions
+        if (button.matches('.js-multi-split')) handleMultiSplitClick(button);
+        if (button.matches('.js-multi-move')) handleMultiMoveClick(button);
+        if (button.matches('.js-multi-release')) handleMultiReleaseClick(button);
+    });
+
+    // --- CHANGE LISTENER ---
+    container.addEventListener('change', (event) => {
+        const target = event.target;
+
+        if (target.id === 'activeIncidentsSelect') handleActiveIncidentSelect();
+        if (target.id === 'commonGroupSelect') handleAddGroup(); // For selecting a common group
+        if (target.matches('.available-unit-checkbox')) handleAvailableUnitCheckboxChange(target);
+        if (target.matches('.group-unit-checkbox')) handleGroupUnitCheckboxChange(target);
+    });
+}
+
+
+// ===================================================================
+//
+//  COMMAND AND INCIDENT LIFECYCLE HANDLERS
+//
+// ===================================================================
+
+async function handleTakeCommandClick() {
+  if (!appState.currentIncident || !appState.sessionId) return;
+
+  const actionButton = document.getElementById("takeCommandBtn");
+  const buttonText = actionButton.textContent.trim();
+  const incidentId = appState.currentIncident.id;
+
+  // --- THIS IS THE CRITICAL FIX ---
+  // We now differentiate between re-establishing and taking command.
+  if (buttonText === "Re-establish Command") {
+    showLoader();
+    try {
+      // Call the new, dedicated API action for this specific case.
+      await callApi("reestablishCommand", { incidentId, sessionId: appState.sessionId }, 'POST');
+      // On success, use the safe reloader.
+      await reloadCurrentIncidentView();
+    } catch (error) {
+      showError(`Could not re-establish command: ${error.message}`);
+      hideLoader();
+    }
+    return;
+  }
+  // --- END OF CRITICAL FIX ---
+
+  const primaryActionTexts = ["Take Command", "Take Over Command"];
+  if (primaryActionTexts.includes(buttonText)) {
+    if (appState.currentIncident.commanderUid && appState.currentIncident.commanderUid !== appState.currentUser.uid) {
+      if (!confirm("Are you sure you want to take command from another user?")) return;
+    }
+    showLoader();
+    try {
+      // The generic "take command" action is still used for other cases.
+      await callApi("takeIncidentCommand", { incidentId, sessionId: appState.sessionId }, 'POST');
+      await reloadCurrentIncidentView();
+    } catch (error) {
+      showError(`Could not take command: ${error.message}`);
+      hideLoader();
+    }
+    return;
+  }
+
+  if (buttonText === "Request Command") {
+    actionButton.disabled = true;
+    actionButton.textContent = "Sending Request...";
+    try {
+      appState.isCommandRequestPending = true;
+      const response = await callApi("requestIncidentCommand", { incidentId, sessionId: appState.sessionId }, 'POST');
+      if (!response.success) throw new Error(response.message);
+      actionButton.textContent = "Request Sent...";
+      listenForMyRequestStatus(response.data.id);
+    } catch (error) {
+      showError(`Could not request command: ${error.message}`);
+      actionButton.disabled = false;
+      actionButton.textContent = "Request Command";
+      appState.isCommandRequestPending = false;
+    }
+  }
+}
+
+/**
+ * Handles the click of the "View Only" button.
+ * This function now correctly calls the "dumb renderer" (loadAndDisplayIncident)
+ * directly, immediately and safely putting the user into View Only mode
+ * without any risk of a race condition or state re-evaluation.
+ */
+async function handleViewOnlyClick() {
+  if (!appState.currentIncident) return;
+
+  // THE CRITICAL FIX:
+  // We call the renderer directly, passing it the data we already have
+  // and explicitly telling it to render in "View Only" mode. This is the
+  // user's explicit choice and we must obey it directly.
+  await loadAndDisplayIncident(appState.currentIncident, true);
+}
+
+/**
+ * The master function to fully load all data for an incident and render it.
+ * This is the "Dumb Renderer". It should only be called by a function that
+ * has already fetched fresh data.
+ */
+async function loadAndDisplayIncident(incidentData, isViewOnly = false) {
+  clearAllIncidentListeners();
+  appState.currentIncident = incidentData;
+  appState.isViewOnly = isViewOnly;
+  sessionStorage.setItem(`fcb_lastActiveIncidentId_${appState.currentUser.uid}`, incidentData.id);
+
+  showLoader();
+  try {
+    await Promise.all([
+      loadGroupsForCurrentIncident(),
+      loadSplitUnits(),
+      loadAvailableUnits()
+    ]);
+
+    renderIncidentContent();
+    listenForIncidentChanges();
+
+    if (!appState.isViewOnly) {
+      listenForCommandRequests();
+    }
+  } catch (error) {
+    showError(error.message);
+    clearIncidentDetails();
+  } finally {
+    hideLoader();
+  }
+}
+
+/**
+ * The "Smart Reloader". Its job is to fetch the latest truth from the
+ * server and then delegate the work of drawing the screen to the "Dumb Renderer".
+ */
+async function reloadCurrentIncidentView() {
+  if (!appState.currentIncident) {
+    await handleManualRefresh();
+    return;
+  }
+  const incidentId = appState.currentIncident.id;
+  try {
+    const response = await callApi("getIncidentDetails", { incidentId });
+    if (!response.success) throw new Error(response.message);
+    const latestIncidentData = response.data;
+    const amINowTheCommander = latestIncidentData.commanderUid === appState.currentUser.uid;
+    await loadAndDisplayIncident(latestIncidentData, !amINowTheCommander);
+  } catch (error) {
+    showError("Failed to reload the incident view. You may need to return to the list and re-select the incident.");
+  }
+}
+
+async function loadGroupsForCurrentIncident() {
+    if (!appState.currentIncident) return;
+    try {
+        const response = await callApi("getGroupsForIncident", {
+            incidentId: appState.currentIncident.id,
+        });
+        if (response.success) {
+            if (appState.currentIncident) {
+                appState.currentIncident.groups = response.data;
+            }
+        } else {
+            showError(response.message);
+            if (appState.currentIncident) appState.currentIncident.groups = [];
+        }
+    } catch (error) {
+        showError(error.message);
+        if (appState.currentIncident) appState.currentIncident.groups = [];
+    }
+}
+
+function clearIncidentDetails() {
+  clearAllIncidentListeners();
+  appState.currentIncident = null;
+  appState.isViewOnly = false;
+  appState.isCommandRequestPending = false;
+  const mainContent = document.getElementById("commandMainContent");
+  if (mainContent) mainContent.innerHTML = "";
+  setIncidentActiveUI(false);
+}
+
+function clearAllIncidentListeners() {
+    if (mainIncidentListener) mainIncidentListener();
+    if (commandRequestListener) commandRequestListener();
+    if (myRequestStatusListener) myRequestStatusListener();
+    if (groupsListener) groupsListener();
+    if (assignmentsListener) assignmentsListener();
+    mainIncidentListener = null;
+    commandRequestListener = null;
+    myRequestStatusListener = null;
+    groupsListener = null;
+    assignmentsListener = null;
+}
+
+/**
+ * Handles selecting an incident from the dropdown. This definitive version
+ * correctly distinguishes between an incident commanded by another user vs.
+ * one commanded by the current user on a different device, preventing a user
+ * from requesting command from themselves.
+ */
+async function handleActiveIncidentSelect() {
+  clearAllIncidentListeners();
+  const select = document.getElementById("activeIncidentsSelect");
+  const actionButtons = document.getElementById("incident-action-buttons");
+  const takeCommandBtn = document.getElementById("takeCommandBtn");
+  const viewOnlyBtn = document.getElementById("viewOnlyBtn");
+
+  // Reset the UI to a clean state
+  if (!select || !select.value) {
+    if (actionButtons) actionButtons.style.display = "none";
+    appState.currentIncident = null;
+    return;
+  }
+  const incidentId = select.value;
+  actionButtons.style.display = "block";
+  takeCommandBtn.style.display = "block";
+  takeCommandBtn.disabled = true;
+  takeCommandBtn.textContent = "Verifying Status...";
+  viewOnlyBtn.style.display = "none";
+
+  try {
+    const response = await callApi("getIncidentDetails", { incidentId });
+    if (!response.success) throw new Error(response.message);
+    appState.currentIncident = response.data;
+    const incident = appState.currentIncident;
+
+    // --- THIS IS THE FINAL, CORRECTED LOGIC HIERARCHY ---
+    const isCommanded = !!incident.commanderUid;
+    const isCommandedByMyUser = isCommanded && incident.commanderUid === appState.currentUser.uid;
+    const isCommandedByThisSession = isCommandedByMyUser && incident.commanderSessionId === appState.sessionId;
+
+    const canRequestOrView = appState.planLevel !== 'Basic';
+    takeCommandBtn.style.display = 'block';
+    viewOnlyBtn.style.display = 'none';
+
+    if (!isCommanded) {
+      // SCENARIO 1: Incident is available.
+      takeCommandBtn.textContent = "Take Command";
+      takeCommandBtn.disabled = false;
+    } else {
+      // Incident is commanded by someone.
+      if (isCommandedByThisSession) {
+        // SCENARIO 2: Commanded by a dead session on this device.
+        takeCommandBtn.textContent = "Re-establish Command";
+        takeCommandBtn.disabled = false;
+      } else if (isCommandedByMyUser) {
+        // SCENARIO 3: Commanded by ME, but on a DIFFERENT device (iPad-1).
+        // A user cannot request command from themselves.
+        takeCommandBtn.textContent = "Commanded on another device";
+        takeCommandBtn.disabled = true;
+        if (canRequestOrView) {
+          viewOnlyBtn.style.display = 'block';
+        }
+      } else {
+        // SCENARIO 4: Commanded by a DIFFERENT user.
+        if (canRequestOrView) {
+          takeCommandBtn.textContent = "Request Command";
+          takeCommandBtn.disabled = false;
+          viewOnlyBtn.style.display = 'block';
+        } else {
+          // Basic plan user looking at another user's incident.
+          takeCommandBtn.textContent = "Commanded by another user";
+          takeCommandBtn.disabled = true;
+        }
+      }
+    }
+    // --- END OF FINAL LOGIC ---
+
+  } catch (error) {
+    showError(`Failed to get incident details: ${error.message}`);
+  }
+}
+
+async function handleCloseIncident() {
+  if (appState.isViewOnly || !appState.currentIncident) return;
+  if (!confirm(`Are you sure you want to CLOSE incident ${appState.currentIncident.incidentNumber}?`)) return;
+  clearAllIncidentListeners();
+  showLoader();
+  try {
+    await callApi("closeIncident", { incidentId: appState.currentIncident.id }, 'POST');
+    await handleManualRefresh();
+  } catch (error) {
+    showError(error.message);
+    hideLoader();
+  }
+}
+
+/**
+ * Attaches all necessary real-time listeners for an active incident.
+ * This definitive version is session-aware, preventing race conditions when a
+ * user is active on multiple devices. It only triggers a full UI reload when
+ * the command status of THIS SPECIFIC SESSION changes.
+ */
+function listenForIncidentChanges() {
+  if (mainIncidentListener) mainIncidentListener();
+  if (!appState.currentIncident) return;
+
+  const db = firebase.firestore();
+  const incidentId = appState.currentIncident.id;
+  const customerId = appState.initialData.customerId;
+
+  mainIncidentListener = db.collection("incidents").doc(incidentId)
+    .onSnapshot(async (doc) => {
+      // --- THIS IS THE NEW, ROBUST LOGIC ---
+      // Determine the command status of THIS BROWSER before the update.
+      const amICurrentlyTheCommander =
+        !appState.isViewOnly &&
+        appState.currentIncident.commanderSessionId === appState.sessionId;
+
+      if (!doc.exists || doc.data().status !== 'Active') {
+        alert("This incident is no longer active. Returning to the main list.");
+        await handleManualRefresh();
+        return;
+      }
+
+      const freshData = doc.data();
+      // Determine what the command status of THIS BROWSER *should be* now.
+      const shouldINowBeTheCommander =
+        freshData.commanderUid === appState.currentUser.uid &&
+        freshData.commanderSessionId === appState.sessionId;
+
+      // The critical comparison: Only trigger a reload if the command status
+      // for this specific session has changed.
+      if (shouldINowBeTheCommander !== amICurrentlyTheCommander) {
+        const logMsg = "Command status change for this session detected. " +
+          "Triggering a full, safe reload of the incident view.";
+        console.log(logMsg);
+        await reloadCurrentIncidentView();
+      } else {
+        // If our command status hasn't changed, update the incident data
+        // in the background without a full redraw.
+        appState.currentIncident = { id: doc.id, ...freshData };
+      }
+      // --- END OF NEW LOGIC ---
+    });
+
+  const refreshTacticalView = async () => {
+    if (!appState.currentIncident) return;
+    await loadGroupsForCurrentIncident();
+    renderGroupCards(appState.currentIncident.groups || []);
+  };
+
+  groupsListener = db.collection("groups")
+    .where("incidentId", "==", incidentId)
+    .where("customerId", "==", customerId)
+    .onSnapshot(refreshTacticalView);
+
+  assignmentsListener = db.collection("assignments")
+    .where("incidentId", "==", incidentId)
+    .where("customerId", "==", customerId)
+    .onSnapshot(refreshTacticalView);
+}
+
+// ===================================================================
+//
+//  COMMAND REQUEST WORKFLOW
+//
+// ===================================================================
+
+/**
+ * Listens for incoming command requests for the active commander.
+ */
+function listenForCommandRequests() {
+  if (commandRequestListener) commandRequestListener();
+  if (!appState.currentIncident || appState.isViewOnly) return;
+
+  const db = firebase.firestore();
+  commandRequestListener = db.collection("commandRequests")
+    .where("incidentId", "==", appState.currentIncident.id)
+    .where("currentCommanderUid", "==", appState.currentUser.uid)
+    .where("status", "==", "pending")
+    .onSnapshot((snapshot) => {
+      if (!snapshot.empty) {
+        const request = snapshot.docs[0].data();
+        const requestId = snapshot.docs[0].id;
+        const requesterName = document.getElementById("requesterNameDisplay");
+        if (requesterName) requesterName.textContent = request.requesterName || "An unknown user";
+        const approveBtn = document.getElementById("approveCommandRequestBtn");
+        const denyBtn = document.getElementById("denyCommandRequestBtn");
+        if (approveBtn) approveBtn.dataset.requestId = requestId;
+        if (denyBtn) denyBtn.dataset.requestId = requestId;
+        $('#commandRequestModal').modal('show');
+      } else {
+        $('#commandRequestModal').modal('hide');
+      }
+    }, (error) => {
+      console.error("Listener for incoming command requests failed:", error);
+    });
+}
+
+/**
+ * Listens for the status of a command request that THIS user sent.
+ */
+function listenForMyRequestStatus(requestId) {
+  if (myRequestStatusListener) myRequestStatusListener();
+
+  const db = firebase.firestore();
+  myRequestStatusListener = db.collection("commandRequests").doc(requestId)
+    .onSnapshot(async (doc) => {
+      if (!doc.exists) {
+        if (myRequestStatusListener) myRequestStatusListener();
+        appState.isCommandRequestPending = false;
+        return;
+      }
+      const requestData = doc.data();
+      if (requestData.status === 'approved') {
+        if (myRequestStatusListener) myRequestStatusListener();
+        appState.isCommandRequestPending = false;
+        console.log("My command request was approved. Triggering smart reload into command mode.");
+        await reloadCurrentIncidentView();
+      }
+      else if (requestData.status === 'denied') {
+        if (myRequestStatusListener) myRequestStatusListener();
+        appState.isCommandRequestPending = false;
+        alert("Your request to take command was denied.");
+        const takeCommandBtn = document.getElementById("takeCommandBtn");
+        if (takeCommandBtn) {
+            takeCommandBtn.textContent = "Request Command";
+            takeCommandBtn.disabled = false;
+        }
+      }
+    }, (error) => {
+      if (myRequestStatusListener) myRequestStatusListener();
+      appState.isCommandRequestPending = false;
+      console.error("Listener for my request status failed:", error);
+    });
+}
+
+/**
+ * Handles the click of the "Approve" button in the command request modal.
+ */
+async function handleApproveCommandRequest() {
+    const approveBtn = document.getElementById("approveCommandRequestBtn");
+    const requestId = approveBtn.dataset.requestId;
+    if (!requestId) return;
+    $('#commandRequestModal').modal('hide');
+    showLoader();
+    try {
+        await callApi("approveCommandRequest", { requestId: requestId }, 'POST');
+    } catch (error) {
+        showError(error.message);
+        hideLoader();
+    }
+}
+
+/**
+ * Handles the click of the "Deny" button in the command request modal.
+ */
+async function handleDenyCommandRequest() {
+  const denyBtn = document.getElementById("denyCommandRequestBtn");
+  const requestId = denyBtn.dataset.requestId;
+  if (!requestId) return;
+  $('#commandRequestModal').modal('hide');
+  showLoader();
+  try {
+    await callApi("denyCommandRequest", { requestId: requestId }, 'POST');
+  } catch (error) {
+    showError(error.message);
+  } finally {
+    hideLoader();
+  }
+}
+
+// ===================================================================
+//
+//  TACTICAL GROUP AND UNIT HANDLERS
 //
 // ===================================================================
 
@@ -401,7 +902,6 @@ async function handleGroupCardClick(clickedGroupId) {
         handleReorderClick(clickedGroupId);
         return;
     }
-
     if (appState.isAssignParentModeActive) {
         const { childGroupId } = appState.groupToAssignParent;
         const parentGroupId = clickedGroupId;
@@ -414,7 +914,6 @@ async function handleGroupCardClick(clickedGroupId) {
         showLoader();
         try {
             await callApi('setGroupParent', {
-                id: appState.launchId,
                 incidentId: appState.currentIncident.id,
                 childGroupId,
                 parentGroupId,
@@ -422,14 +921,13 @@ async function handleGroupCardClick(clickedGroupId) {
             appState.isAssignParentModeActive = false;
             appState.groupToAssignParent = null;
             updateAssignParentModeUI();
-            await loadAndDisplayIncident(appState.currentIncident);
+            await reloadCurrentIncidentView();
         } catch (error) {
             showError(error.message);
             hideLoader();
         }
         return;
     }
-
     if (appState.isMultiMoveActive) {
         const { fromGroupId, unitIds } = appState.unitsToMultiMove;
         if (clickedGroupId === fromGroupId) {
@@ -441,7 +939,6 @@ async function handleGroupCardClick(clickedGroupId) {
         showLoader();
         try {
             await callApi("moveMultipleUnits", {
-                id: appState.launchId,
                 incidentId: appState.currentIncident.id,
                 newGroupId: clickedGroupId,
                 unitIds: unitIds.join(','),
@@ -450,30 +947,64 @@ async function handleGroupCardClick(clickedGroupId) {
             appState.isMultiMoveActive = false;
             appState.unitsToMultiMove = null;
             updateMultiMoveModeUI(false);
-            await loadAndDisplayIncident(appState.currentIncident);
+            await reloadCurrentIncidentView();
         } catch (error) {
             showError(error.message);
             hideLoader();
         }
         return;
     }
-
     if (appState.unitToMove) {
         handleGroupCardMoveClick(clickedGroupId);
         return;
     }
-
     if (appState.selectedAvailableUnits.size > 0) {
         handleGroupCardAssignment(clickedGroupId);
         return;
     }
-
-    console.log(`Group card ${clickedGroupId} clicked, but no action pending.`);
 }
 
-/**
- * Handles clicks on group cards when in reorder mode.
- */
+async function handleGroupCardAssignment(groupId) {
+  if (appState.isViewOnly) return;
+  const selectedIds = Array.from(appState.selectedAvailableUnits);
+  if (selectedIds.length === 0) return;
+  showLoader();
+  try {
+    await callApi("assignUnitsToGroup", {
+      incidentId: appState.currentIncident.id,
+      groupId,
+      unitIds: selectedIds.join(",")
+    });
+    appState.selectedAvailableUnits.clear();
+    updateAssignmentModeUI();
+    await reloadCurrentIncidentView();
+  } catch (error) {
+    showError(error.message);
+    hideLoader();
+  }
+}
+
+async function handleGroupCardMoveClick(newGroupId) {
+  if (appState.isViewOnly) return;
+  const unitToMove = appState.unitToMove;
+  if (!unitToMove) return;
+  showLoader();
+  try {
+    await callApi("moveUnitToNewGroup", {
+      incidentId: appState.currentIncident.id,
+      unitId: unitToMove.unitId,
+      newGroupId,
+    });
+    appState.unitToMove = null;
+    updateMoveModeUI();
+    clearGroupSelectionState();
+    await reloadCurrentIncidentView();
+  } catch (error) {
+    showError(error.message);
+    hideLoader();
+  }
+}
+
 async function handleReorderClick(clickedGroupId) {
     if (!appState.groupToMove) {
         appState.groupToMove = clickedGroupId;
@@ -484,36 +1015,29 @@ async function handleReorderClick(clickedGroupId) {
             updateReorderModeUI();
             return;
         }
-
         const movingId = appState.groupToMove;
         const destinationId = clickedGroupId;
-
         const originalOrderIds = appState.currentIncident.groups
             .filter(g => !g.parentGroupId)
             .map(g => g.id);
-
         const sourceIndex = originalOrderIds.indexOf(movingId);
         const destinationIndex = originalOrderIds.indexOf(destinationId);
-
         if (sourceIndex === -1 || destinationIndex === -1) {
             console.error("Reorder failed: a selected group was not a top-level group.");
             toggleReorderMode();
             return;
         }
-
         const newOrder = [...originalOrderIds];
         const [itemToMove] = newOrder.splice(sourceIndex, 1);
         newOrder.splice(destinationIndex, 0, itemToMove);
-
         toggleReorderMode();
         showLoader();
         try {
             await callApi('updateGroupOrder', {
-                id: appState.launchId,
                 incidentId: appState.currentIncident.id,
                 groupIds: newOrder.join(','),
             });
-            await loadAndDisplayIncident(appState.currentIncident);
+            await reloadCurrentIncidentView();
         } catch (error) {
             showError(error.message);
             hideLoader();
@@ -521,376 +1045,312 @@ async function handleReorderClick(clickedGroupId) {
     }
 }
 
-/**
- * Handles setting a unit as the group supervisor.
- */
 async function handleSetSupervisor(groupId, unitId) {
+  if (appState.isViewOnly) return;
   showLoader();
   try {
     await callApi("setGroupSupervisor", {
-      id: appState.launchId,
       groupId: groupId,
       unitId: unitId,
       incidentId: appState.currentIncident.id,
     });
     clearGroupSelectionState();
-    await loadAndDisplayIncident(appState.currentIncident);
+    await reloadCurrentIncidentView();
   } catch (error) {
     showError(error.message);
     hideLoader();
   }
 }
 
-/**
- * Handles clearing the supervisor from a group.
- */
 async function handleClearSupervisor(groupId) {
+  if (appState.isViewOnly) return;
   showLoader();
   try {
     await callApi("clearGroupSupervisor", {
-      id: appState.launchId,
       groupId: groupId,
       incidentId: appState.currentIncident.id,
     });
     clearGroupSelectionState();
-    await loadAndDisplayIncident(appState.currentIncident);
+    await reloadCurrentIncidentView();
   } catch (error) {
     showError(error.message);
     hideLoader();
   }
 }
 
-/**
- * Handles clicks on the 'Release Selected' button.
- */
 async function handleMultiReleaseClick(button) {
   const groupId = button.dataset.groupId;
   const unitIds = Array.from(appState.selectedGroupUnits[groupId] || []);
-  if (unitIds.length === 0) return;
-
+  if (unitIds.length === 0 || appState.isViewOnly) return;
   showLoader();
   try {
     await callApi("releaseMultipleUnits", {
-      id: appState.launchId,
       incidentId: appState.currentIncident.id,
       unitIds: unitIds.join(','),
     });
     clearGroupSelectionState();
-    await loadAndDisplayIncident(appState.currentIncident);
+    await reloadCurrentIncidentView();
   } catch (error) {
     showError(error.message);
     hideLoader();
   }
 }
 
-/**
- * Handles the click on a unit's "Release" button.
- */
 async function handleReleaseUnitClick(unitId, unitName) {
+  if (appState.isViewOnly) return;
   showLoader();
   try {
     await callApi("releaseUnitToAvailable", {
-      id: appState.launchId,
       incidentId: appState.currentIncident.id,
       unitId: unitId,
     });
     clearGroupSelectionState();
-    await loadAndDisplayIncident(appState.currentIncident);
+    await reloadCurrentIncidentView();
   } catch (error) {
     showError(error.message);
     hideLoader();
   }
 }
 
-/**
- * Handles the click of the "Disband Group" icon.
- */
+async function handleMultiSplitClick(button) {
+  if (appState.isViewOnly) return;
+  const groupId = button.dataset.groupId;
+  const unitIds = Array.from(appState.selectedGroupUnits[groupId] || []);
+  if (unitIds.length === 0) return;
+  if (!confirm(`Are you sure you want to split ${unitIds.length} selected unit(s)?`)) {
+      return;
+  }
+  showLoader();
+  try {
+      await callApi("splitMultipleUnits", {
+          incidentId: appState.currentIncident.id,
+          unitIds: unitIds.join(','),
+          groupId,
+      });
+      clearGroupSelectionState();
+      await reloadCurrentIncidentView();
+  } catch (error) {
+      showError(error.message);
+      hideLoader();
+  }
+}
+
+async function splitUnit(button) {
+  const { unitId, groupId } = button.dataset;
+  if (!unitId || !groupId || appState.isViewOnly) return;
+  showLoader();
+  try {
+    await callApi("splitUnit", {
+      incidentId: appState.currentIncident.id,
+      unitId,
+      groupId,
+    });
+    clearGroupSelectionState();
+    await reloadCurrentIncidentView();
+  } catch (error) {
+    showError(error.message);
+    hideLoader();
+  }
+}
+
 async function handleDisbandGroupClick(button) {
+    if (appState.isViewOnly) return;
     const { groupId, groupName } = button.dataset;
     const confirmationMessage = `Are you sure you want to permanently disband the "${groupName}" group? This action cannot be undone.`;
     if (!confirm(confirmationMessage)) return;
-
     showLoader();
     try {
         await callApi('disbandGroup', {
-            id: appState.launchId,
             incidentId: appState.currentIncident.id,
             groupId: groupId,
         });
-        await loadAndDisplayIncident(appState.currentIncident);
+        await reloadCurrentIncidentView();
     } catch (error) {
         showError(error.message);
         hideLoader();
     }
 }
 
-/**
- * Toggles the "Assign Parent" mode.
- */
 function handleAssignParentClick(button) {
+    if (appState.isViewOnly) return;
     const childGroupId = button.dataset.groupId;
     appState.isAssignParentModeActive = true;
     appState.groupToAssignParent = { childGroupId };
     updateAssignParentModeUI();
 }
 
-/**
- * Handles the click of the "X" button to clear a group's parent.
- */
 async function handleClearParentClick(button) {
+    if (appState.isViewOnly) return;
     const childGroupId = button.dataset.childGroupId;
     showLoader();
     try {
         await callApi('clearGroupParent', {
-            id: appState.launchId,
             incidentId: appState.currentIncident.id,
             childGroupId,
         });
-        await loadAndDisplayIncident(appState.currentIncident);
+        await reloadCurrentIncidentView();
     } catch (error) {
         showError(error.message);
         hideLoader();
     }
 }
 
-/**
- * Handles adding a new group to the current incident.
- */
 async function handleAddGroup() {
-  if (!appState.currentIncident) {
-    showError("Please select an active incident first.");
-    return;
-  }
+  if (appState.isViewOnly || !appState.currentIncident) return;
   const groupNameInput = document.getElementById("newGroupName");
   const commonGroupSelect = document.getElementById("commonGroupSelect");
-  const groupNameToCreate = (commonGroupSelect.value || groupNameInput.value).trim();
+  let groupNameToCreate = groupNameInput.value.trim();
+
+  if (commonGroupSelect && commonGroupSelect.value) {
+      groupNameToCreate = commonGroupSelect.value;
+  }
+
   if (!groupNameToCreate) {
     showError("Please enter a custom group name or select a common group.");
     return;
   }
+
   showLoader();
   try {
     await callApi("createGroupForIncident", {
-      id: appState.launchId,
       incidentId: appState.currentIncident.id,
       groupName: groupNameToCreate,
     });
-    groupNameInput.value = "";
-    commonGroupSelect.value = "";
-    await loadAndDisplayIncident(appState.currentIncident);
+    if (groupNameInput) groupNameInput.value = "";
+    if (commonGroupSelect) commonGroupSelect.value = "";
+    await reloadCurrentIncidentView();
   } catch (error) {
     showError(error.message);
     hideLoader();
   }
 }
 
-/**
- * Handles the click on the "Apply Template" button.
- */
 async function handleApplyTemplate() {
   const select = document.getElementById("templateSelect");
-  if (!select || !select.value) {
-    return;
-  }
-  if (!appState.currentIncident) {
-    showError("Please select an active incident first.");
-    return;
-  }
-
+  if (!select || !select.value || appState.isViewOnly || !appState.currentIncident) return;
   showLoader();
   try {
-    const response = await callApi("applyTemplateToIncident", {
-      id: appState.launchId,
+    await callApi("applyTemplateToIncident", {
       incidentId: appState.currentIncident.id,
       templateId: select.value,
     });
-
-    if (response.success) {
-      await loadAndDisplayIncident(appState.currentIncident);
-    } else {
-      showError(response.message);
-    }
-
+    await reloadCurrentIncidentView();
   } catch (error) {
     showError(error.message);
-  } finally {
     hideLoader();
   }
 }
 
-/**
- * Handles a click on a benchmark button, cycling its status.
- */
 async function handleBenchmarkClick(groupId, benchmarkName, currentStatus) {
+  if (appState.isViewOnly) return;
   const statusCycle = { "Pending": "Started", "Started": "Completed", "Completed": "Pending" };
   const newStatus = statusCycle[currentStatus];
   showLoader();
   try {
     await callApi("updateGroupBenchmark", {
-      id: appState.launchId, groupId, benchmarkName, newStatus,
+      groupId, benchmarkName, newStatus,
     });
-    await loadAndDisplayIncident(appState.currentIncident);
+    await reloadCurrentIncidentView();
   } catch (error) {
     showError(error.message);
     hideLoader();
   }
 }
 
-/**
- * Renders the HTML for the Incident Setup & Selection panel.
- */
 function renderIncidentControl(activeIncidents) {
   const options = (activeIncidents || []).map(inc => {
-    const json = JSON.stringify(inc).replace(/'/g, "'");
-    return `<option value="${inc.id}" data-incident-json='${json}'>${inc.incidentNumber} - ${inc.incidentName || "Unnamed"}</option>`;
+    let statusText = "Available";
+    if (inc.commanderUid) {
+        statusText = (inc.commanderUid === appState.currentUser.uid) ? "Command Reserved for You" : "Commanded by another user";
+    }
+    return `<option value="${inc.id}">${inc.incidentNumber} - ${inc.incidentName || "Unnamed"} [${statusText}]</option>`;
   }).join("");
+
   return `
     <div class="card mb-2 shadow-sm">
       <div class="card-header p-0"><h5 class="mb-0"><button class="btn btn-light btn-block text-left d-flex justify-content-between align-items-center py-2 px-3" type="button" data-toggle="collapse" data-target="#collapseIncidentControl" aria-expanded="true"><span>Incident Setup & Selection</span></button></h5></div>
       <div id="collapseIncidentControl" class="collapse show"><div class="card-body p-3">
         <div class="form-group"><label><b>Select Active Incident:</b></label><select id="activeIncidentsSelect" class="form-control"><option value="">-- Select or Create --</option>${options}</select></div>
+
+        <div id="incident-action-buttons" class="mt-2" style="display:none;">
+            <button id="takeCommandBtn" class="btn btn-success btn-block">Take Command</button>
+            <button id="viewOnlyBtn" class="btn btn-info btn-block">View in Read-Only Mode</button>
+        </div>
+
         <p class="text-center my-2">OR</p>
         <h5 class="mb-2">Create New Incident:</h5>
         <div class="form-group"><label for="incidentNumber">Incident Number (CAD):</label><input type="text" id="incidentNumber" class="form-control form-control-sm" placeholder="Leave blank to auto-generate"></div>
         <div class="form-group"><label for="incidentName">Incident Name (Optional):</label><input type="text" id="incidentName" class="form-control form-control-sm"></div>
         <button id="startNewIncidentBtn" class="btn btn-primary btn-block btn-sm">Start New Incident</button>
-        <button id="closeIncidentBtn" class="btn btn-danger btn-block mt-3 btn-sm" style="display:none;">Close Current Incident</button>
       </div></div>
     </div>`;
 }
 
-/**
- * Clears the incident-specific UI and resets the creation form.
- */
-function clearIncidentDetails() {
-  const mainContent = document.getElementById("commandMainContent");
-  if (mainContent) mainContent.innerHTML = "";
-  setIncidentActiveUI(false);
-}
-
-/**
- * A single function to control the UI state based on incident status.
- */
 function setIncidentActiveUI(isActive) {
-  const startBtn = document.getElementById("startNewIncidentBtn");
-  const closeBtn = document.getElementById("closeIncidentBtn");
   const collapseTarget = document.getElementById("collapseIncidentControl");
-  if (startBtn) startBtn.disabled = isActive;
-  if (closeBtn) closeBtn.style.display = isActive ? "block" : "none";
   if (window.$ && collapseTarget) {
       isActive ? $(collapseTarget).collapse("hide") : $(collapseTarget).collapse("show");
   }
 }
 
-// ===================================================================
-//
-//  ### THIS IS THE SECTION THAT NEEDS TO BE REPLACED ###
-//
-// ===================================================================
-
-/**
- * Fetches and renders units for the available units panel.
- * It now attaches event listeners to the accordion after rendering,
- * allowing it to track which panels the user opens/closes and save
- * that state for subsequent re-renders.
- */
 async function loadAvailableUnits() {
   const container = document.getElementById("available-units-section");
   if (!container) return;
   container.innerHTML = `<p class="text-muted p-2"><em>Loading...</em></p>`;
-
   try {
-    const response = await callApi("getAllAvailableUnitsGroupedByDept", {
-      id: appState.launchId,
-    });
-
+    const response = await callApi("getAllAvailableUnitsGroupedByDept", {});
     if (response.success) {
       appState.departmentsWithAvailableUnits = response.data.departmentsWithUnits;
       container.innerHTML = renderAvailableUnitsAccordion(
         appState.departmentsWithAvailableUnits,
       );
-
-      // --- THE FIX IS HERE ---
-      // After the HTML is on the page, we attach listeners to it.
-      // This uses jQuery, which is already part of the project for Bootstrap.
       const accordion = $('#available-units-accordion');
-
-      // When a panel is shown (opened), add its department ID to our memory set.
-      accordion.on('show.bs.collapse', function (e) {
-        const deptId = $(e.target).closest('.card').data('dept-id');
-        if (deptId) {
-          appState.openAvailableUnitsPanels.add(deptId);
-        }
-      });
-
-      // When a panel is hidden (closed), remove its ID from our memory set.
-      accordion.on('hide.bs.collapse', function (e) {
-        const deptId = $(e.target).closest('.card').data('dept-id');
-        if (deptId) {
-          appState.openAvailableUnitsPanels.delete(deptId);
-        }
-      });
-      // --- END OF FIX ---
-
+      if (accordion.length > 0) {
+        accordion.on('show.bs.collapse', function (e) {
+          const card = e.target.closest('.card');
+          if (card && card.dataset.deptId) appState.openAvailableUnitsPanels.add(card.dataset.deptId);
+        });
+        accordion.on('hide.bs.collapse', function (e) {
+          const card = e.target.closest('.card');
+          if (card && card.dataset.deptId) appState.openAvailableUnitsPanels.delete(card.dataset.deptId);
+        });
+      }
     } else {
-      appState.departmentsWithAvailableUnits = [];
-      showError(response.message);
+      container.innerHTML = `<div class="p-2 text-danger"><em>${response.message}</em></div>`;
     }
   } catch (error) {
-    appState.departmentsWithAvailableUnits = [];
-    showError(error.message);
+     container.innerHTML = `<div class="p-2 text-danger"><em>${error.message}</em></div>`;
   }
 }
 
-/**
- * Builds the HTML for the available units section. This version now reads from
- * `appState.openAvailableUnitsPanels` to remember and restore which accordion
- * panels the user had open, preventing them from collapsing after an action.
- * @param {Array<object>} departmentsWithUnits Data from the API.
- * @return {string} The complete HTML string for the section.
- */
 function renderAvailableUnitsAccordion(departmentsWithUnits) {
   if (!departmentsWithUnits || departmentsWithUnits.length === 0) {
-    const panel = `<div class="p-2 text-muted"><em>No units are available.</em></div>`;
-    return `<div class="mt-2"><h4>Available Units</h4>${panel}</div>`;
+    return `<div class="mt-2"><h4>Available Units</h4><div class="p-2 text-muted"><em>No units are available.</em></div></div>`;
   }
-
+  const isDisabled = appState.isViewOnly ? 'disabled' : '';
   const accordionId = 'available-units-accordion';
   const accordionHtml = departmentsWithUnits.map((dept) => {
     const deptCollapseId = `avail-dept-collapse-${dept.id}`;
     const totalUnitsInDept = dept.units.length;
-
-    // --- THE FIX IS HERE ---
-    // Determine if this panel should be shown.
-    // Logic: Show if (it's the first render AND it's the primary dept)
-    // OR if (its ID is in our 'open panels' memory set).
     const isFirstRender = appState.openAvailableUnitsPanels.size === 0;
     const isShown = (isFirstRender && dept.isPrimary) || appState.openAvailableUnitsPanels.has(dept.id);
     const showClass = isShown ? 'show' : '';
-    // --- END OF FIX ---
-
     const tableHtml = `
       <div class="table-responsive">
         <table class="table table-sm table-hover available-units-table">
           <thead>
             <tr>
               <th scope="col" style="width: 5%;"></th>
-              <th scope="col" class="sortable-header" data-sort-by="unit" data-dept-id="${dept.id}">
-                Unit <span class="sort-indicator"></span>
-              </th>
-              <th scope="col" class="sortable-header" data-sort-by="unitName" data-dept-id="${dept.id}">
-                Name <span class="sort-indicator"></span>
-              </th>
-              <th scope="col" class="sortable-header" data-sort-by="stationName" data-dept-id="${dept.id}">
-                Station <span class="sort-indicator"></span>
-              </th>
+              <th scope="col">Unit</th>
+              <th scope="col">Name</th>
+              <th scope="col">Station</th>
             </tr>
           </thead>
-          <tbody id="available-units-tbody-${dept.id}">
+          <tbody>
             ${dept.units.map(unit => `
               <tr>
                 <td>
-                  <input type="checkbox" class="available-unit-checkbox" id="chk-avail-${unit.id}" data-unit-id="${unit.id}">
+                  <input type="checkbox" class="available-unit-checkbox" id="chk-avail-${unit.id}" data-unit-id="${unit.id}" ${isDisabled}>
                 </td>
                 <td>${unit.unit}</td>
                 <td>${unit.unitName || ''}</td>
@@ -900,7 +1360,6 @@ function renderAvailableUnitsAccordion(departmentsWithUnits) {
           </tbody>
         </table>
       </div>`;
-
     return `
       <div class="card mb-1" data-dept-id="${dept.id}">
         <div class="card-header p-0">
@@ -912,157 +1371,78 @@ function renderAvailableUnitsAccordion(departmentsWithUnits) {
           </h5>
         </div>
         <div id="${deptCollapseId}" class="collapse ${showClass}">
-          <div class="card-body p-0">
-            ${tableHtml}
-          </div>
+          <div class="card-body p-0">${tableHtml}</div>
         </div>
       </div>
     `;
   }).join('');
-
   return `<div class="mt-2"><h4>Available Units</h4><div class="accordion" id="${accordionId}">${accordionHtml}</div></div>`;
 }
 
-/**
- * Handles the user selecting an incident from the dropdown.
- */
-function handleActiveIncidentSelect() {
-  const select = document.getElementById("activeIncidentsSelect");
-  if (!select) return;
-
-  appState.selectedAvailableUnits.clear();
-  clearGroupSelectionState();
-  updateAssignmentModeUI();
-
-  const selectedValue = select.value;
-
-  if (!selectedValue) {
-    appState.currentIncident = null;
-    sessionStorage.removeItem("fcb_lastActiveIncidentId");
-    clearIncidentDetails();
-    loadAvailableUnits();
-    return;
-  }
-
-  const selectedOption = select.options[select.selectedIndex];
-  if (selectedOption && selectedOption.dataset.incidentJson) {
-    try {
-      const incidentData = JSON.parse(selectedOption.dataset.incidentJson);
-      loadAndDisplayIncident(incidentData);
-    } catch (error) {
-      console.error("Failed to parse incident data from dropdown:", error);
-      showError("Could not load the selected incident.");
-    }
-  }
-}
-
-/**
- * Handles the "Start New Incident" button click.
- */
 async function handleStartNewIncident() {
   const incidentNumberInput = document.getElementById("incidentNumber");
   const incidentNameInput = document.getElementById("incidentName");
-  const startBtn = document.getElementById("startNewIncidentBtn");
-  if (startBtn.disabled) return;
-  startBtn.disabled = true;
-
+  if (!appState.sessionId) {
+      showError("Session not initialized. Cannot start incident.");
+      return;
+  }
   showLoader();
   try {
     const response = await callApi("startNewIncident", {
-      id: appState.launchId,
       incidentNumber: incidentNumberInput.value,
       incidentName: incidentNameInput.value,
-    });
+      sessionId: appState.sessionId,
+    }, 'POST');
     if (response.success && response.data) {
-      const newIncident = response.data;
-      appState.initialData.activeIncidents.unshift(newIncident);
-      const select = document.getElementById("activeIncidentsSelect");
-      if (select) {
-        const json = JSON.stringify(newIncident).replace(/'/g, "'");
-        const newOption = new Option(
-          `${newIncident.incidentNumber} - ${newIncident.incidentName || "Unnamed"}`,
-          newIncident.id
-        );
-        newOption.dataset.incidentJson = json;
-        select.insertBefore(newOption, select.options[1]);
-        select.value = newIncident.id;
+      const initialDataResponse = await callApi("getInitialData");
+      if (initialDataResponse.success) appState.initialData = initialDataResponse.data;
+      const sidebar = document.getElementById('commandSidebar');
+      if (sidebar) {
+        const incidentControl = sidebar.querySelector('.card');
+        if (incidentControl) incidentControl.outerHTML = renderIncidentControl(appState.initialData.activeIncidents || []);
       }
-      handleActiveIncidentSelect();
+      const select = document.getElementById("activeIncidentsSelect");
+      if(select) select.value = response.data.id;
+      await loadAndDisplayIncident(response.data, false);
       if (incidentNumberInput) incidentNumberInput.value = "";
       if (incidentNameInput) incidentNameInput.value = "";
     } else {
       showError(response.message || "Failed to start new incident.");
-      if (startBtn) startBtn.disabled = false;
+      hideLoader();
     }
   } catch (error) {
     showError(error.message);
-    if (startBtn) startBtn.disabled = false;
-  } finally {
     hideLoader();
   }
 }
 
-/**
- * Handles closing the current incident.
- */
-async function handleCloseIncident() {
-  if (!appState.currentIncident) {
-    showError("No active incident to close.");
-    return;
-  }
-  const incidentNumber = appState.currentIncident.incidentNumber;
-  if (!confirm(`Are you sure you want to CLOSE incident ${incidentNumber}?`)) {
-    return;
-  }
-  showLoader();
-  try {
-    const response = await callApi("closeIncident", {
-      id: appState.launchId,
-      incidentId: appState.currentIncident.id,
-    });
-    if (response.success) {
-      initializeApp();
-    } else { showError(response.message); }
-  } catch (error) { showError(error.message); }
-  finally { hideLoader(); }
-}
-
-/**
- * Populates the "Apply a Template" dropdown.
- */
 function populateTemplateDropdown(templates) {
   const select = document.getElementById("templateSelect");
   if (!select) return;
   select.innerHTML = '<option value="">-- Select a Template --</option>';
   if (templates && templates.length > 0) {
     templates.forEach((template) => {
-      const opt = new Option(template.templateName, template.id);
-      opt.dataset.templateJson = JSON.stringify(template);
-      select.appendChild(opt);
+      select.appendChild(new Option(template.templateName, template.id));
     });
   }
 }
 
-/**
- * Populates the "Add Single Common Group" dropdown.
- */
 function populateCommonGroupsDropdown(commonGroups) {
   const select = document.getElementById("commonGroupSelect");
   if (!select) return;
   select.innerHTML = '<option value="">-- Select Common Group --</option>';
   if (commonGroups && commonGroups.length > 0) {
     commonGroups.forEach((cg) => {
-      if (cg && cg.name) {
-        select.appendChild(new Option(cg.name, cg.name));
-      }
+      if (cg && cg.name) select.appendChild(new Option(cg.name, cg.name));
     });
   }
 }
 
-/**
- * Handles the click event for an available unit's checkbox.
- */
 function handleAvailableUnitCheckboxChange(checkbox) {
+  if (appState.isViewOnly) {
+    checkbox.checked = !checkbox.checked;
+    return;
+  }
   const unitId = checkbox.dataset.unitId;
   if (!unitId) return;
   if (checkbox.checked) {
@@ -1073,70 +1453,16 @@ function handleAvailableUnitCheckboxChange(checkbox) {
   updateAssignmentModeUI();
 }
 
-/**
- * Toggles a CSS class on the body to change the UI when units are selected.
- */
 function updateAssignmentModeUI() {
-  const body = document.body;
-  if (appState.selectedAvailableUnits.size > 0) {
-    body.classList.add("assignment-mode-active");
-  } else {
-    body.classList.remove("assignment-mode-active");
-  }
+  document.body.classList.toggle("assignment-mode-active", appState.selectedAvailableUnits.size > 0);
 }
 
-/**
- * Executes the API call to assign selected available units to a group.
- */
-async function handleGroupCardAssignment(groupId) {
-  const selectedIds = Array.from(appState.selectedAvailableUnits);
-  if (selectedIds.length === 0) return;
-  showLoader();
-  try {
-    const response = await callApi("assignUnitsToGroup", {
-      id: appState.launchId,
-      incidentId: appState.currentIncident.id,
-      groupId: groupId,
-      unitIds: selectedIds.join(","),
-    });
-    if (response.success) {
-      appState.selectedAvailableUnits.clear();
-      updateAssignmentModeUI();
-      await loadAndDisplayIncident(appState.currentIncident);
-    } else {
-      showError(response.message);
-      hideLoader();
-    }
-  } catch (error) {
-    showError(error.message);
-    hideLoader();
-  }
-}
-
-/**
- * Toggles a CSS class on the body to change the UI when a unit is moved.
- */
 function updateMoveModeUI() {
-  const body = document.body;
-  const banner = document.getElementById("unit-action-banner");
-  body.classList.remove("assignment-mode-active");
-  if (appState.unitToMove) {
-    body.classList.add("move-mode-active");
-    if (banner) {
-      banner.innerHTML = `<div class="moving-unit-banner">...</div>`;
-    }
-  } else {
-    body.classList.remove("move-mode-active");
-    if (banner) {
-      banner.innerHTML = `<h4>Available Units</h4>`;
-    }
-  }
+  document.body.classList.toggle("move-mode-active", !!appState.unitToMove);
 }
 
-/**
- * Handles the click on a unit's "Move" button.
- */
 function handleMoveUnitClick(unitId, unitName) {
+  if (appState.isViewOnly) return;
   if (appState.unitToMove && appState.unitToMove.unitId === unitId) {
     appState.unitToMove = null;
   } else {
@@ -1145,40 +1471,11 @@ function handleMoveUnitClick(unitId, unitName) {
   updateMoveModeUI();
 }
 
-/**
- * Handles the click on a group card when in single-unit move mode.
- */
-async function handleGroupCardMoveClick(newGroupId) {
-  const unitToMove = appState.unitToMove;
-  if (!unitToMove) return;
-  showLoader();
-  try {
-    const response = await callApi("moveUnitToNewGroup", {
-      id: appState.launchId,
-      incidentId: appState.currentIncident.id,
-      unitId: unitToMove.unitId,
-      newGroupId: newGroupId,
-    });
-    if (response.success) {
-      appState.unitToMove = null;
-      updateMoveModeUI();
-      clearGroupSelectionState();
-      await loadAndDisplayIncident(appState.currentIncident);
-    } else {
-      showError(response.message);
-      hideLoader();
-    }
-  } catch (error) {
-    showError(error.message);
-    hideLoader();
-  }
-}
-
-
-/**
- * Handles the change event for a unit's checkbox within a group.
- */
 function handleGroupUnitCheckboxChange(checkbox) {
+  if (appState.isViewOnly) {
+    checkbox.checked = !checkbox.checked;
+    return;
+  }
   const { unitId, groupId } = checkbox.dataset;
   if (!unitId || !groupId) return;
   if (!appState.selectedGroupUnits[groupId]) {
@@ -1192,39 +1489,32 @@ function handleGroupUnitCheckboxChange(checkbox) {
       delete appState.selectedGroupUnits[groupId];
     }
   }
-  updateGroupCardActions(groupId, appState.currentIncident.groups);
+  updateGroupCardActions(groupId);
 }
 
-/**
- * The single source of truth for updating a group card's UI.
- */
-function updateGroupCardActions(groupId, allGroups) {
+function updateGroupCardActions(groupId) {
   const card = document.getElementById(`group-card-${groupId}`);
   if (!card) return;
-
   const multiActionsPanel = card.querySelector('.multi-unit-actions');
   const countSpan = card.querySelector('.multi-unit-selection-count');
   const unitRows = card.querySelectorAll('.unit-in-group');
-
   const selectedUnitIds = appState.selectedGroupUnits[groupId];
   const selectedCount = selectedUnitIds?.size || 0;
 
-  multiActionsPanel.style.display = 'none';
+  if (multiActionsPanel) multiActionsPanel.style.display = 'none';
   card.classList.remove('multi-select-active');
   unitRows.forEach(row => row.classList.remove('unit-selected'));
 
   if (selectedCount === 1) {
     const selectedUnitId = selectedUnitIds.values().next().value;
     const selectedRow = card.querySelector(`input[data-unit-id="${selectedUnitId}"]`)?.closest('.unit-in-group');
-    if (selectedRow) {
-        selectedRow.classList.add('unit-selected');
-    }
+    if (selectedRow) selectedRow.classList.add('unit-selected');
   } else if (selectedCount > 1) {
-    countSpan.textContent = `${selectedCount} Unit(s) Selected`;
-    multiActionsPanel.style.display = 'block';
+    if(countSpan) countSpan.textContent = `${selectedCount} Unit(s) Selected`;
+    if(multiActionsPanel) multiActionsPanel.style.display = 'block';
     card.classList.add('multi-select-active');
 
-    const group = allGroups.find(g => g.id === groupId);
+    const group = appState.currentIncident.groups.find(g => g.id === groupId);
     let isAnySubunitSelected = false;
     if (group && group.units) {
       isAnySubunitSelected = [...selectedUnitIds].some(selectedId => {
@@ -1235,7 +1525,6 @@ function updateGroupCardActions(groupId, allGroups) {
 
     const multiSplitButton = card.querySelector('.js-multi-split');
     const multiReleaseButton = card.querySelector('.js-multi-release');
-
     if (multiSplitButton) {
       multiSplitButton.disabled = isAnySubunitSelected;
       multiSplitButton.title = isAnySubunitSelected ? "Cannot split subunits" : "Split selected units";
@@ -1247,88 +1536,46 @@ function updateGroupCardActions(groupId, allGroups) {
   }
 }
 
-/**
- * Handles the click of a single unit's "Split" icon.
- */
-async function splitUnit(button) {
-  const { unitId, groupId } = button.dataset;
-  if (!unitId || !groupId) return;
-
-  showLoader();
-  try {
-    await callApi("splitUnit", {
-      id: appState.launchId,
-      incidentId: appState.currentIncident.id,
-      unitId,
-      groupId,
-    });
-
-    clearGroupSelectionState();
-    await loadAndDisplayIncident(appState.currentIncident);
-
-  } catch (error) {
-    showError(error.message);
-  } finally {
-    hideLoader();
-  }
-}
-
-/**
- * Handles clicks on the 'Move Selected' button.
- */
 function handleMultiMoveClick(button) {
+    if (appState.isViewOnly) return;
     const fromGroupId = button.dataset.groupId;
     const unitIds = Array.from(appState.selectedGroupUnits[fromGroupId] || []);
     if (unitIds.length === 0) return;
     appState.isMultiMoveActive = true;
     appState.unitsToMultiMove = { fromGroupId, unitIds };
     delete appState.selectedGroupUnits[fromGroupId];
-    updateGroupCardActions(fromGroupId, appState.currentIncident.groups);
+    updateGroupCardActions(fromGroupId);
     updateMultiMoveModeUI(true);
 }
 
-/**
- * Toggles the UI state for multi-unit move mode.
- */
 function updateMultiMoveModeUI(isActive) {
   document.body.classList.toggle('move-mode-active', isActive);
 }
 
-/**
- * Fetches and renders the "Split Units" management panel.
- */
 async function loadSplitUnits() {
     const container = document.getElementById("split-units-section");
     if (!container || !appState.currentIncident) {
         if (container) container.innerHTML = "";
         return;
     }
-    container.innerHTML = `<p class="text-muted p-2"><em>Loading split units...</em></p>`;
+    container.innerHTML = `<p class="text-muted p-2"><em>Loading...</em></p>`;
     try {
         const response = await callApi("getSplitUnitsForIncident", {
-            id: appState.launchId,
             incidentId: appState.currentIncident.id,
         });
         if (response.success) {
             container.innerHTML = renderSplitUnitsPanel(response.data);
         } else {
-            showError(response.message);
+            container.innerHTML = `<div class="p-2 text-danger"><em>${response.message}</em></div>`;
         }
     } catch (error) {
-        showError(error.message);
+        container.innerHTML = `<div class="p-2 text-danger"><em>${error.message}</em></div>`;
     }
 }
 
-/**
- * Builds the HTML for the "Split Units" panel.
- */
 function renderSplitUnitsPanel(subunits) {
-    if (!subunits || subunits.length === 0) {
-        return "";
-    }
-    const sortedSubunits = [...subunits].sort((a, b) =>
-        (a.unit || "").localeCompare(b.unit || "")
-    );
+    if (!subunits || subunits.length === 0) return "";
+    const sortedSubunits = [...subunits].sort((a, b) => (a.unit || "").localeCompare(b.unit || ""));
     const unitsHtml = sortedSubunits.map(unit => `
         <li class="list-group-item py-1 px-2 d-flex justify-content-between align-items-center">
             <span>${unit.unit}</span>
@@ -1346,10 +1593,8 @@ function renderSplitUnitsPanel(subunits) {
         </div>`;
 }
 
-/**
- * Opens the modal to confirm unsplitting a unit.
- */
 function openUnsplitUnitModal(button) {
+    if (appState.isViewOnly) return;
     const parentUnitId = button.dataset.parentUnitId;
     document.getElementById("unsplitParentUnitId").value = parentUnitId;
     const groupSelect = document.getElementById("unsplitGroupSelect");
@@ -1360,9 +1605,6 @@ function openUnsplitUnitModal(button) {
     $('#unsplitUnitModal').modal('show');
 }
 
-/**
- * Handles the final confirmation of the unsplit action.
- */
 async function handleConfirmUnsplit() {
   const parentUnitId = document.getElementById("unsplitParentUnitId").value;
   const newGroupId = document.getElementById("unsplitGroupSelect").value;
@@ -1374,23 +1616,20 @@ async function handleConfirmUnsplit() {
   $('#unsplitUnitModal').modal('hide');
   try {
     await callApi("unsplitUnit", {
-      id: appState.launchId,
       incidentId: appState.currentIncident.id,
       parentUnitId,
       newGroupId,
     });
     clearGroupSelectionState();
-    await loadAndDisplayIncident(appState.currentIncident);
+    await reloadCurrentIncidentView();
   } catch (error) {
     showError(error.message);
     hideLoader();
   }
 }
 
-/**
- * Handles clicks on a PAR button.
- */
 function handleParButtonClick(button) {
+    if (appState.isViewOnly) return;
     const { groupId, parStatus } = button.dataset;
     if (!groupId) return;
     if (parStatus === 'Idle') {
@@ -1400,41 +1639,34 @@ function handleParButtonClick(button) {
     }
 }
 
-/**
- * Calls the API to start the PAR timer.
- */
 async function startParTimer(groupId) {
+    if (appState.isViewOnly) return;
     showLoader();
     try {
-        await callApi('startParTimer', { id: appState.launchId, groupId });
-        await loadAndDisplayIncident(appState.currentIncident);
+        await callApi('startParTimer', { groupId });
+        await reloadCurrentIncidentView();
     } catch (error) {
         showError(error.message);
         hideLoader();
     }
 }
 
-/**
- * Calls the API to stop the PAR timer.
- */
 async function stopParTimer(groupId) {
+    if (appState.isViewOnly) return;
     showLoader();
     try {
-        await callApi('stopParTimer', { id: appState.launchId, groupId });
+        await callApi('stopParTimer', { groupId });
         if (appState.parTimerIntervals[groupId]) {
             clearInterval(appState.parTimerIntervals[groupId]);
             delete appState.parTimerIntervals[groupId];
         }
-        await loadAndDisplayIncident(appState.currentIncident);
+        await reloadCurrentIncidentView();
     } catch (error) {
         showError(error.message);
         hideLoader();
     }
 }
 
-/**
- * Scans all rendered groups and starts client-side checks for any active timers.
- */
 function initializeParTimers(groups) {
     const parDurationMinutes = appState.initialData.settings?.parTimerDurationMinutes || 10;
     const parDurationMs = parDurationMinutes * 60 * 1000;
@@ -1470,18 +1702,13 @@ function initializeParTimers(groups) {
     });
 }
 
-/**
- * Toggles the group reordering mode on or off.
- */
 function toggleReorderMode() {
+    if (appState.isViewOnly) return;
     appState.isReorderModeActive = !appState.isReorderModeActive;
     appState.groupToMove = null;
     updateReorderModeUI();
 }
 
-/**
- * Updates the UI to reflect the current reorder mode state.
- */
 function updateReorderModeUI() {
     const container = document.getElementById('groupsContainer');
     const reorderBtn = document.getElementById('reorderGroupsBtn');
@@ -1494,58 +1721,23 @@ function updateReorderModeUI() {
         el.classList.remove('group-selected-for-move');
     });
     if (appState.groupToMove) {
-        const cardToHighlight = document.querySelector(`.js-draggable-group[data-group-id="${appState.groupToMove}"] .group-card`);
+        const cardToHighlight = document.querySelector(`.group-card[data-group-id="${appState.groupToMove}"]`);
         if (cardToHighlight) {
             cardToHighlight.classList.add('group-selected-for-move');
         }
     }
 }
 
-/**
- * Updates the UI to reflect if "Assign Parent" mode is active.
- */
 function updateAssignParentModeUI() {
     document.body.classList.toggle('assign-parent-active', appState.isAssignParentModeActive);
 }
 
-/**
- * Handles a click on a sortable table header for available units.
- */
-function handleSortAvailableUnits(header) {
-  const { sortBy, deptId } = header.dataset;
-  if (!sortBy || !deptId) return;
-
-  const currentDirection = header.dataset.sortDir || 'asc';
-  const newDirection = currentDirection === 'asc' ? 'desc' : 'asc';
-
-  const dept = appState.departmentsWithAvailableUnits.find(d => d.id === deptId);
-  if (!dept || !dept.units) return;
-
-  dept.units.sort((a, b) => {
-    const valA = a[sortBy] || '';
-    const valB = b[sortBy] || '';
-    const comparison = valA.localeCompare(valB, undefined, { numeric: true });
-    return newDirection === 'asc' ? comparison : -comparison;
-  });
-
-  const tbody = document.getElementById(`available-units-tbody-${deptId}`);
-  if (tbody) {
-    tbody.innerHTML = dept.units.map(unit => `
-      <tr>
-        <td>
-          <input type="checkbox" class="available-unit-checkbox" id="chk-avail-${unit.id}" data-unit-id="${unit.id}">
-        </td>
-        <td>${unit.unit}</td>
-        <td>${unit.unitName || ''}</td>
-        <td>${unit.stationName || ''}</td>
-      </tr>
-    `).join('');
-  }
-
-  document.querySelectorAll(`.sortable-header[data-dept-id="${deptId}"]`).forEach(th => {
-    th.classList.remove('sort-asc', 'sort-desc');
-    delete th.dataset.sortDir;
-  });
-  header.dataset.sortDir = newDirection;
-  header.classList.add(newDirection === 'asc' ? 'sort-asc' : 'sort-desc');
+// A helper function to get a readable contrasting color (black or white) for a given hex color.
+function getContrastYIQ(hexcolor){
+    hexcolor = hexcolor.replace("#", "");
+    var r = parseInt(hexcolor.substr(0,2),16);
+    var g = parseInt(hexcolor.substr(2,2),16);
+    var b = parseInt(hexcolor.substr(4,2),16);
+    var yiq = ((r*299)+(g*587)+(b*114))/1000;
+    return (yiq >= 128) ? 'black' : 'white';
 }
