@@ -34,8 +34,8 @@ document.addEventListener("DOMContentLoaded", () => {
 
   async function initializeFirebase() {
     // Explicitly define the two possible paths
-    const devConfigPath = '/apps/common/firebase-config-dev.js';
-    const prodConfigPath = '/apps/common/firebase-config-prod.js';
+    const devConfigPath = '/firebase-config-dev.js';
+    const prodConfigPath = '/firebase-config-prod.js';
     
     let configToLoad;
     const hostname = window.location.hostname;
