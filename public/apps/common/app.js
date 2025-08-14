@@ -30,50 +30,55 @@ document.addEventListener("DOMContentLoaded", () => {
   const loader = document.getElementById('loader');
   if (appContainer) appContainer.style.display = 'none';
   if (loader) loader.style.display = 'block';
-  // ---- START: NEW DYNAMIC CONFIG LOGIC ----
+  // --- START: NEW ROBUST DYNAMIC CONFIG LOGIC ---
 
-  // This function will fetch and initialize Firebase
   async function initializeFirebase() {
-    let configPath;
+    // Explicitly define the two possible paths
+    const devConfigPath = '/apps/common/firebase-config-dev.js';
+    const prodConfigPath = '/apps/common/firebase-config-prod.js';
+    
+    let configToLoad;
     const hostname = window.location.hostname;
 
-    if (hostname.includes('netresponders-apps-dev--') || hostname.includes('localhost') || hostname.includes('127.0.0.1')) {
-      // We are running in a development environment (Preview Channel or Local).
+    // The condition to check for any development environment
+    const isDevelopment = hostname.includes('netresponders-apps-dev--') || 
+                          hostname.includes('localhost') || 
+                          hostname.includes('127.0.0.1');
+
+    if (isDevelopment) {
       console.log("Environment: DEVELOPMENT");
-      configModulePath = '/apps/common/firebase-config-dev.js';
+      configToLoad = devConfigPath;
     } else {
-      // We are running on our live production site.
       console.log("Environment: PRODUCTION");
-      configModulePath = '/apps/common/firebase-config-prod.js';
+      configToLoad = prodConfigPath;
     }
 
     try {
-      // Dynamically import the config file
-      const configModule = await import(configPath);
+      console.log(`Attempting to load config from: ${configToLoad}`);
+      const configModule = await import(configToLoad);
       const firebaseConfig = configModule.firebaseConfig;
 
-      // Initialize Firebase with the loaded config
-      // This makes the global `firebase` object available to the rest of your app
+      if (!firebaseConfig) {
+        throw new Error("firebaseConfig object not found in the loaded module.");
+      }
+
       firebase.initializeApp(firebaseConfig);
       console.log("Firebase has been initialized successfully.");
-
-      // Now that Firebase is ready, set up the authentication listener
-      setupAuthListener();
+      
+      setupAuthListener(); // Proceed to the next step
 
     } catch (err) {
-      console.error("CRITICAL: Failed to load Firebase config or initialize app.", err);
-      // You could display a critical error message to the user here
+      console.error(`CRITICAL: Failed to load Firebase config from ${configToLoad}.`, err);
     }
   }
 
-  // This function contains your original onAuthStateChanged logic
   function setupAuthListener() {
     firebase.auth().onAuthStateChanged(user => {
       if (user) {
         if (isInitializing) return;
         isInitializing = true;
         if (appContainer) appContainer.style.display = 'block';
-        initializeApp(user); // Your original initializeApp function
+        initializeApp(user);
       } else {
         isInitializing = false;
         if (appState.sessionHeartbeatInterval) clearInterval(appState.sessionHeartbeatInterval);
@@ -89,9 +94,8 @@ document.addEventListener("DOMContentLoaded", () => {
   // Start the entire process
   initializeFirebase();
 
-  // ---- END: NEW DYNAMIC CONFIG LOGIC ----
+  // --- END: NEW ROBUST DYNAMIC CONFIG LOGIC ---
 });
-
 
 /**
  * Main application initializer - FINAL DEFINITIVE VERSION
