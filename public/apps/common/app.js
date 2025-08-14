@@ -38,12 +38,14 @@ document.addEventListener("DOMContentLoaded", () => {
     const hostname = window.location.hostname;
 
     // The 'idx.dev' check is specifically for the Firebase Studio preview window
-    if (hostname.includes('idx.dev') || hostname === 'localhost' || hostname === '127.0.0.1') {
+    if (hostname.includes('cloudworkstations.dev') || hostname.includes('idx.dev') || hostname === 'localhost' || hostname === '127.0.0.1') {
+      // We are running in a development environment.
       console.log("Environment: DEVELOPMENT");
-      configPath = './firebase-config-dev.js';
+      configModulePath = '/apps/common/firebase-config-dev.js';
     } else {
+      // We are running on our live production site OR a Firebase Hosting preview channel.
       console.log("Environment: PRODUCTION");
-      configPath = './firebase-config-prod.js';
+      configModulePath = '/apps/common/firebase-config-prod.js';
     }
 
     try {
