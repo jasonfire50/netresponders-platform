@@ -1,5 +1,9 @@
 {
   "projects": {
-    "default": "netresponders-apps-50"
-  }
+    "default": "netresponders-apps-50",
+    "dev": "netresponders-apps-dev",
+    "prod": "netresponders-apps-50"
+  },
+  "targets": {},
+  "etags": {}
 }

@@ -30,22 +30,65 @@ document.addEventListener("DOMContentLoaded", () => {
   const loader = document.getElementById('loader');
   if (appContainer) appContainer.style.display = 'none';
   if (loader) loader.style.display = 'block';
-  firebase.auth().onAuthStateChanged(user => {
-    if (user) {
-      if (isInitializing) return;
-      isInitializing = true;
-      if (appContainer) appContainer.style.display = 'block';
-      initializeApp(user);
+  // ---- START: NEW DYNAMIC CONFIG LOGIC ----
+
+  // This function will fetch and initialize Firebase
+  async function initializeFirebase() {
+    let configPath;
+    const hostname = window.location.hostname;
+
+    // The 'idx.dev' check is specifically for the Firebase Studio preview window
+    if (hostname.includes('idx.dev') || hostname === 'localhost' || hostname === '127.0.0.1') {
+      console.log("Environment: DEVELOPMENT");
+      configPath = './firebase-config-dev.js';
     } else {
-      isInitializing = false;
-      if (appState.sessionHeartbeatInterval) clearInterval(appState.sessionHeartbeatInterval);
-      Object.assign(appState, { sessionId: null, currentUser: null, idToken: null, isLockedOut: false, isViewOnly: false });
-      const currentPath = window.location.pathname;
-      if (!currentPath.includes('/login.html')) {
-        window.location.href = `/login.html?redirect=${currentPath}`;
-      }
+      console.log("Environment: PRODUCTION");
+      configPath = './firebase-config-prod.js';
     }
-  });
+
+    try {
+      // Dynamically import the config file
+      const configModule = await import(configPath);
+      const firebaseConfig = configModule.firebaseConfig;
+
+      // Initialize Firebase with the loaded config
+      // This makes the global `firebase` object available to the rest of your app
+      firebase.initializeApp(firebaseConfig);
+      console.log("Firebase has been initialized successfully.");
+
+      // Now that Firebase is ready, set up the authentication listener
+      setupAuthListener();
+
+    } catch (err) {
+      console.error("CRITICAL: Failed to load Firebase config or initialize app.", err);
+      // You could display a critical error message to the user here
+    }
+  }
+
+  // This function contains your original onAuthStateChanged logic
+  function setupAuthListener() {
+    firebase.auth().onAuthStateChanged(user => {
+      if (user) {
+        if (isInitializing) return;
+        isInitializing = true;
+        if (appContainer) appContainer.style.display = 'block';
+        initializeApp(user); // Your original initializeApp function
+      } else {
+        isInitializing = false;
+        if (appState.sessionHeartbeatInterval) clearInterval(appState.sessionHeartbeatInterval);
+        Object.assign(appState, { sessionId: null, currentUser: null, idToken: null, isLockedOut: false, isViewOnly: false });
+        const currentPath = window.location.pathname;
+        if (!currentPath.includes('/login.html')) {
+          window.location.href = `/login.html?redirect=${currentPath}`;
+        }
+      }
+    });
+  }
+
+  // Start the entire process
+  initializeFirebase();
+
+  // ---- END: NEW DYNAMIC CONFIG LOGIC ----
 });
 
 
