@@ -2,6 +2,16 @@
  * auth.js - FINAL DEFINITIVE VERSION
  */
 
+// Define these constants at the top level of the script
+const hostname = window.location.hostname;
+const isDevelopment = hostname.includes('netresponders-apps-dev--') || 
+                      hostname.includes('localhost') || 
+                      hostname.includes('127.0.0.1');
+
+const API_URL = isDevelopment 
+  ? "https://us-central1-netresponders-apps-dev.cloudfunctions.net/api"  // DEV URL
+  : "https://us-central1-netresponders-apps-50.cloudfunctions.net/api"; // PROD URL
+  
 function initializeLoginForm() {
 const auth = firebase.auth();
 const loginForm = document.getElementById('login-form');
@@ -29,18 +39,7 @@ loginForm.addEventListener('submit', (e) => {
       loginButton.textContent = 'Creating Session...';
       try {
         const idToken = await userCredential.user.getIdToken(true);
-        
-        // ---- START: Dynamic API URL Logic ----
-        const hostname = window.location.hostname;
-        const isDevelopment = hostname.includes('netresponders-apps-dev--') || 
-                              hostname.includes('localhost') || 
-                              hostname.includes('127.0.0.1');
-
-        const API_URL = isDevelopment 
-          ? "https://us-central1-netresponders-apps-dev.cloudfunctions.net/api"  // DEV URL
-          : "https://us-central1-netresponders-apps-50.cloudfunctions.net/api"; // PROD URL
-        // ---- END: Dynamic API URL Logic ----
-        
+            
         const response = await fetch(API_URL, {
           method: 'POST',
           headers: { 'Authorization': `Bearer ${idToken}`, 'Content-Type': 'application/json' },
