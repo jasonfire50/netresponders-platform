@@ -244,10 +244,7 @@ function renderApp() {
       <div id="reportingView" class="view"></div>
       <div id="adminView" class="view"></div>
       ${isSuperAdmin ? '<div id="superAdminView" class="view"></div>' : ''}
-    </div>
-    <footer class="text-muted text-center mt-4 small">
-      App Version: ${APP_VERSION}
-    </footer>`;
+    </div>`;
 }
 
 /**
