@@ -149,6 +149,16 @@ async function initializeApp(user) {
   appState.sessionId = currentSessionId;
   try {
     appState.idToken = await user.getIdToken(true);
+    
+    const userDocRef = firebase.firestore().collection('users').doc(user.uid);
+    const userDoc = await userDocRef.get();
+    if (!userDoc.exists) {
+        // This is a critical error. The user is authenticated, but we have no data for them.
+        throw new Error("User data not found in database.");
+    }
+    const userData = userDoc.data();
+    appState.isSuperAdmin = userData.isSuperAdmin === true; // Set a global flag
+    
     const statusResponse = await callApi("checkSessionStatus", { sessionId: appState.sessionId }, 'POST');
     if (!statusResponse.success) throw new Error(statusResponse.message);
     if (statusResponse.data.status === 'locked_out') {
@@ -220,8 +230,7 @@ async function manageHeartbeat() {
 function renderApp() {
   const appContainer = document.getElementById("app-container");
   if (!appContainer) return;
-  const SUPER_ADMIN_UID = "WRikDrCVOqTbXHK11mteAD9Fr4t1";
-  const isSuperAdmin = appState.currentUser.uid === SUPER_ADMIN_UID;
+  const isSuperAdmin = appState.isSuperAdmin;
   const superAdminTabHtml = isSuperAdmin ? `<li class="nav-item"><a class="nav-link" data-view="superAdminView" href="#"><i class="fas fa-user-shield"></i> Super Admin</a></li>` : '';
   appContainer.innerHTML = `
     <div class="d-flex align-items-center mb-2">
