@@ -65,6 +65,10 @@ document.addEventListener("DOMContentLoaded", () => {
       firebase.initializeApp(firebaseConfig);
       console.log("Firebase has been initialized successfully.");
       
+      if (typeof initializeLoginForm === 'function') {
+        initializeLoginForm();
+      }
+
       setupAuthListener(); // Proceed to the next step
 
     } catch (err) {

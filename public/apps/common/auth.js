@@ -1,6 +1,8 @@
 /**
  * auth.js - FINAL DEFINITIVE VERSION
  */
+
+function initializeLoginForm() {
 const auth = firebase.auth();
 const loginForm = document.getElementById('login-form');
 const loginButton = document.getElementById('login-button');
@@ -56,3 +58,4 @@ loginForm.addEventListener('submit', (e) => {
       loginButton.textContent = 'Login';
     });
 });
+}
