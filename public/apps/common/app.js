@@ -86,14 +86,22 @@ document.addEventListener("DOMContentLoaded", () => {
   function setupAuthListener() {
     firebase.auth().onAuthStateChanged(user => {
       if (user) {
+        const currentPath = window.location.pathname;
+      
+        // If we are already logged in AND we are on the login page,
+        // just redirect to the main app without doing anything else.
+        if (currentPath.includes('/login.html')) {
+          window.location.href = '/command'; // Or your main app page
+          return; // Stop execution here
+        }
+      
+        // If we are on any other page, proceed with the full app initialization.
         if (isInitializing) return;
         isInitializing = true;
         if (appContainer) appContainer.style.display = 'block';
         initializeApp(user);
+      
       } else {
-        isInitializing = false;
-        if (appState.sessionHeartbeatInterval) clearInterval(appState.sessionHeartbeatInterval);
-        Object.assign(appState, { sessionId: null, currentUser: null, idToken: null, isLockedOut: false, isViewOnly: false });
         const currentPath = window.location.pathname;
         if (!currentPath.includes('/login.html')) {
           window.location.href = `/login.html?redirect=${currentPath}`;
