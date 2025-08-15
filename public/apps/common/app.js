@@ -18,6 +18,20 @@ let appState = {
 
 function clearGroupSelectionState() { appState.selectedGroupUnits = {}; }
 
+// ===================================================================
+//
+//  ENVIRONMENT CONSTANTS
+//
+// ===================================================================
+const hostname = window.location.hostname;
+const isDevelopment = hostname.includes('netresponders-apps-dev--') || 
+                      hostname.includes('localhost') || 
+                      hostname.includes('127.0.0.1');
+
+const API_URL = isDevelopment 
+  ? "https://us-central1-netresponders-apps-dev.cloudfunctions.net/api"  // DEV URL
+  : "https://us-central1-netresponders-apps-50.cloudfunctions.net/api"; // PROD URL
+
 
 // ===================================================================
 //
@@ -36,14 +50,7 @@ document.addEventListener("DOMContentLoaded", () => {
     // Explicitly define the two possible paths
     const devConfigPath = '/firebase-config-dev.js';
     const prodConfigPath = '/firebase-config-prod.js';
-    
     let configToLoad;
-    const hostname = window.location.hostname;
-
-    // The condition to check for any development environment
-    const isDevelopment = hostname.includes('netresponders-apps-dev--') || 
-                          hostname.includes('localhost') || 
-                          hostname.includes('127.0.0.1');
 
     if (isDevelopment) {
       console.log("Environment: DEVELOPMENT");
@@ -354,9 +361,8 @@ function showView(viewId) {
  * A secure, centralized function for making all API calls.
  */
 async function callApi(action, params = {}, method = 'GET') {
-  const API_URL = "https://us-central1-netresponders-apps-50.cloudfunctions.net/api";
+  
   const url = new URL(API_URL);
-
   const headers = {
     'Authorization': `Bearer ${appState.idToken}`,
     'Content-Type': 'application/json'
