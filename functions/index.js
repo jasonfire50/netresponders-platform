@@ -59,6 +59,7 @@ async function getAuthContextFromIdToken(req) {
       customerId: userData.customerId,
       planLevel: userData.planLevel || "Basic",
       name: userData.name || "Unknown User",
+      isSuperAdmin: userData.isSuperAdmin === true, // <-- ADD THIS LINE
     };
   } catch (error) {
     console.error("Error while verifying ID token:", error);
@@ -2967,7 +2968,7 @@ async function deleteIncident(query, authContext) {
  * @throws {Error} If the caller is not the Super Admin.
  */
 function verifySuperAdmin(authContext) {
-  if (authContext.auth.token.isSuperAdmin !== true) {
+  if (authContext.isSuperAdmin !== true) { // <-- This is correct
     const errorMsg =
       "You must be a Super Admin to perform this action.";
     throw new functions.https.HttpsError(
