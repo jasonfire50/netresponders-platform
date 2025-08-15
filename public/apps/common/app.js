@@ -123,42 +123,40 @@ document.addEventListener("DOMContentLoaded", () => {
  */
 async function initializeApp(user) {
   console.log(`App Version: ${APP_VERSION} loading...`);
-  // ---- START: New Session Handling Logic ----
+  
+  // Session handling logic (This part is correct and remains)
   const urlParams = new URLSearchParams(window.location.search);
   const sessionIdFromUrl = urlParams.get('sessionId');
   let currentSessionId = sessionStorage.getItem('sessionId');
-
   if (sessionIdFromUrl) {
-    // If a new sessionId is in the URL, save it to sessionStorage and use it.
     sessionStorage.setItem('sessionId', sessionIdFromUrl);
     currentSessionId = sessionIdFromUrl;
-    
-    // Clean the sessionId from the URL so it's not visible to the user
     window.history.replaceState({}, document.title, window.location.pathname);
   }
-  
   if (!currentSessionId) {
     console.error("CRITICAL: No session ID found. Forcing logout.");
     await firebase.auth().signOut();
     return;
   }
-  // ---- END: New Session Handling Logic ----
 
   appState.isAuthenticated = true;
   appState.currentUser = user;
   appState.sessionId = currentSessionId;
+
   try {
     appState.idToken = await user.getIdToken(true);
-    
+
+    // --- START: CORRECTED LOGIC ---
+    // STEP 1: Fetch the user's Firestore document
     const userDocRef = firebase.firestore().collection('users').doc(user.uid);
     const userDoc = await userDocRef.get();
     if (!userDoc.exists) {
-        // This is a critical error. The user is authenticated, but we have no data for them.
-        throw new Error("User data not found in database.");
+      throw new Error("User data not found in database.");
     }
     const userData = userDoc.data();
-    appState.isSuperAdmin = userData.isSuperAdmin === true; // Set a global flag
-    
+    appState.isSuperAdmin = userData.isSuperAdmin === true;
+
+    // STEP 2: Check the session status
     const statusResponse = await callApi("checkSessionStatus", { sessionId: appState.sessionId }, 'POST');
     if (!statusResponse.success) throw new Error(statusResponse.message);
     if (statusResponse.data.status === 'locked_out') {
@@ -170,10 +168,15 @@ async function initializeApp(user) {
       hideLoader();
       return;
     }
+
+    // STEP 3: Fetch the rest of the initial application data (THIS WAS THE MISSING PIECE)
     const initialDataResponse = await callApi("getInitialData");
     if (!initialDataResponse.success) throw new Error(initialDataResponse.message);
     appState.initialData = initialDataResponse.data;
     appState.planLevel = initialDataResponse.data.planLevel || 'Basic';
+    // --- END: CORRECTED LOGIC ---
+
+    // Now that ALL data is loaded, render the app
     renderApp();
     setupGlobalEventListeners();
     manageHeartbeat();
@@ -181,6 +184,7 @@ async function initializeApp(user) {
     const authStatus = document.getElementById("auth-status");
     if (authStatus) authStatus.textContent = `Authenticated: ${user.email}`;
     showView("commandBoardView");
+
   } catch (error) {
     console.error("CRITICAL INITIALIZATION FAILED:", error);
     await firebase.auth().signOut();
