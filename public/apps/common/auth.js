@@ -50,8 +50,11 @@ function initializeLoginForm() {
           if (!response.ok || !responseData.success) {
             throw new Error(responseData.message || "Failed to create a valid session.");
           }
-          sessionStorage.setItem('sessionId', responseData.data.sessionId);
-          window.location.href = redirectUrl;
+          const sessionId = responseData.data.sessionId;
+          // We will no longer set sessionStorage here.
+          // Instead, we will pass the ID in the URL.
+          const finalRedirectUrl = `${redirectUrl}?sessionId=${sessionId}`;
+          window.location.href = finalRedirectUrl;
 
         } catch (sessionError) {
           console.error("Session creation failed:", sessionError);

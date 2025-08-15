@@ -115,12 +115,27 @@ document.addEventListener("DOMContentLoaded", () => {
  */
 async function initializeApp(user) {
   console.log(`App Version: ${APP_VERSION} loading...`);
-  const sessionId = sessionStorage.getItem('sessionId');
-  if (!sessionId) {
+  // ---- START: New Session Handling Logic ----
+  const urlParams = new URLSearchParams(window.location.search);
+  const sessionIdFromUrl = urlParams.get('sessionId');
+  let currentSessionId = sessionStorage.getItem('sessionId');
+
+  if (sessionIdFromUrl) {
+    // If a new sessionId is in the URL, save it to sessionStorage and use it.
+    sessionStorage.setItem('sessionId', sessionIdFromUrl);
+    currentSessionId = sessionIdFromUrl;
+    
+    // Clean the sessionId from the URL so it's not visible to the user
+    window.history.replaceState({}, document.title, window.location.pathname);
+  }
+  
+  if (!currentSessionId) {
     console.error("CRITICAL: No session ID found. Forcing logout.");
     await firebase.auth().signOut();
     return;
   }
+  // ---- END: New Session Handling Logic ----
+  
   appState.isAuthenticated = true;
   appState.currentUser = user;
   appState.sessionId = sessionId;
