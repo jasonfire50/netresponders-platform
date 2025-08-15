@@ -135,10 +135,10 @@ async function initializeApp(user) {
     return;
   }
   // ---- END: New Session Handling Logic ----
-  
+
   appState.isAuthenticated = true;
   appState.currentUser = user;
-  appState.sessionId = sessionId;
+  appState.sessionId = currentSessionId;
   try {
     appState.idToken = await user.getIdToken(true);
     const statusResponse = await callApi("checkSessionStatus", { sessionId: appState.sessionId }, 'POST');
