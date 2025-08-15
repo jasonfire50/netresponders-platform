@@ -51,7 +51,9 @@ loginForm.addEventListener('submit', (e) => {
           throw new Error(responseData.message || "Failed to create a valid session.");
         }
         sessionStorage.setItem('sessionId', responseData.data.sessionId);
-        window.location.href = redirectUrl;
+        setTimeout(() => {
+          window.location.href = redirectUrl;
+        }, 50); // A tiny 50ms delay
       } catch (sessionError) {
         console.error("Session creation failed:", sessionError);
         loginError.textContent = `Login Failed: ${sessionError.message}`;
