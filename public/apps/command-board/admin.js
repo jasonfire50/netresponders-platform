@@ -21,68 +21,80 @@
  * elements, as it works automatically for any content that is re-rendered.
  */
 function setupAdminEventListeners() {
-    const container = document.getElementById('adminView');
-    // Ensure this is only run once to prevent duplicate listeners.
-    if (!container || container.dataset.listenersAttached === 'true') {
-        return;
-    }
-    container.dataset.listenersAttached = 'true';
+  const container = document.getElementById('adminView');
+  // Ensure this is only run once to prevent duplicate listeners.
+  if (!container || container.dataset.listenersAttached === 'true') {
+      return;
+  }
+  container.dataset.listenersAttached = 'true';
 
-    // --- DELEGATED CLICK LISTENER ---
-    container.addEventListener('click', (event) => {
-        const target = event.target;
-        const button = target.closest('button');
-        if (!button) return; // Ignore clicks that aren't on a button
+  // --- DELEGATED CLICK LISTENER ---
+  // ATTACH TO THE DOCUMENT to catch clicks inside modals
+  document.addEventListener('click', (event) => {
+      const adminView = document.getElementById('adminView');
 
-        // Department Actions
-        if (button.id === 'addDepartmentBtn') openDepartmentModal();
-        if (button.matches('.js-edit-dept')) openDepartmentModal(button.dataset.id);
-        if (button.matches('.js-delete-dept')) handleDeleteDepartmentClick(button.dataset.id, button.dataset.name);
+      // GUARD CLAUSE: Only run this logic if the admin view is visible.
+      // This prevents the listener from interfering with other views.
+      if (!adminView || adminView.style.display === 'none') {
+          return;
+      }
 
-        // Unit Actions
-        if (button.id === 'addUnitBtn') openUnitModal();
-        if (button.matches('.js-edit-unit')) openUnitModal(button.dataset.id);
-        if (button.matches('.js-delete-unit')) handleDeleteUnitClick(button.dataset.id, button.dataset.name);
+      const target = event.target;
+      const button = target.closest('button');
+      if (!button) return; // Ignore clicks that aren't on a button
 
-        // Unit Type Actions
-        if (button.id === 'addUnitTypeBtn') openUnitTypeModal();
-        if (button.matches('.js-edit-type')) openUnitTypeModal(button.dataset.id);
-        if (button.matches('.js-delete-type')) handleDeleteUnitTypeClick(button.dataset.id, button.dataset.name);
+      // Department Actions
+      if (button.id === 'addDepartmentBtn') openDepartmentModal();
+      if (button.matches('.js-edit-dept')) openDepartmentModal(button.dataset.id);
+      if (button.matches('.js-delete-dept')) handleDeleteDepartmentClick(button.dataset.id, button.dataset.name);
 
-        // Library Actions (Templates & Common Groups)
-        if (button.id === 'addTemplateBtn') openTemplateModal();
-        if (button.matches('.js-edit-template')) openTemplateModal(button.dataset.id);
-        if (button.matches('.js-delete-template')) handleDeleteTemplateClick(button.dataset.id, button.dataset.name);
-        if (button.id === 'addCommonGroupBtn') openCommonGroupModal();
-        if (button.matches('.js-edit-cgroup')) openCommonGroupModal(button.dataset.id);
-        if (button.matches('.js-delete-cgroup')) handleDeleteCommonGroupClick(button.dataset.id, button.dataset.name);
-        if (button.id === 'addTemplateGroupBtn') addGroupToTemplateModalList();
+      // Unit Actions
+      if (button.id === 'addUnitBtn') openUnitModal();
+      if (button.matches('.js-edit-unit')) openUnitModal(button.dataset.id);
+      if (button.matches('.js-delete-unit')) handleDeleteUnitClick(button.dataset.id, button.dataset.name);
 
-        // Incident Management Actions
-        if (button.id === 'deleteIncidentBtn') handleDeleteIncidentClick();
+      // Unit Type Actions
+      if (button.id === 'addUnitTypeBtn') openUnitTypeModal();
+      if (button.matches('.js-edit-type')) openUnitTypeModal(button.dataset.id);
+      if (button.matches('.js-delete-type')) handleDeleteUnitTypeClick(button.dataset.id, button.dataset.name);
 
-        // Settings Actions
-        if (button.id === 'saveSettingsBtn') handleSaveSettings();
+      // Library Actions (Templates & Common Groups)
+      if (button.id === 'addTemplateBtn') openTemplateModal();
+      if (button.matches('.js-edit-template')) openTemplateModal(button.dataset.id);
+      if (button.matches('.js-delete-template')) handleDeleteTemplateClick(button.dataset.id, button.dataset.name);
+      if (button.id === 'addCommonGroupBtn') openCommonGroupModal();
+      if (button.matches('.js-edit-cgroup')) openCommonGroupModal(button.dataset.id);
+      if (button.matches('.js-delete-cgroup')) handleDeleteCommonGroupClick(button.dataset.id, button.dataset.name);
+      
+      // THIS LINE WILL NOW WORK
+      if (button.id === 'addTemplateGroupBtn') addGroupToTemplateModalList();
 
-        // Table Sorting Header
-        const sortableHeader = target.closest('.sortable-header-admin');
-        if (sortableHeader) {
-            handleSortAdminUnits(sortableHeader);
-        }
-    });
+      // Incident Management Actions
+      if (button.id === 'deleteIncidentBtn') handleDeleteIncidentClick();
 
-    // --- DELEGATED CHANGE LISTENER ---
-    container.addEventListener('change', (event) => {
-        const target = event.target;
-        // Department filter for units
-        if (target.id === 'adminUnitDeptFilter') {
-            loadAdminUnits(target.value);
-        }
-        // Incident selection
-        if (target.id === 'closedIncidentSelect') {
-            handleAdminIncidentSelect();
-        }
-    });
+      // Settings Actions
+      if (button.id === 'saveSettingsBtn') handleSaveSettings();
+
+      // Table Sorting Header
+      const sortableHeader = target.closest('.sortable-header-admin');
+      if (sortableHeader) {
+          handleSortAdminUnits(sortableHeader);
+      }
+  });
+
+  // --- DELEGATED CHANGE LISTENER ---
+  // This can safely stay on the container
+  container.addEventListener('change', (event) => {
+      const target = event.target;
+      // Department filter for units
+      if (target.id === 'adminUnitDeptFilter') {
+          loadAdminUnits(target.value);
+      }
+      // Incident selection
+      if (target.id === 'closedIncidentSelect') {
+          handleAdminIncidentSelect();
+      }
+  });
 }
 
 /**

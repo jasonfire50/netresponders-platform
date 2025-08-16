@@ -258,17 +258,14 @@
     <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-firestore.js"></script>
     <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-functions.js"></script>
 
-    <!-- Centralized initializer FIRST -->
-    <script src="apps/common/firebase-init.js"></script>
-
     <!-- Custom Application Logic -->
-    <script src="apps/common/utils.js"></script>
-    <script src="apps/command-board/admin.js"></script>
-    <script src="apps/command-board/reporting.js"></script>
-    <script src="apps/command-board/command-board.js"></script>
-    <script src="/apps/command-board/super-admin.js"></script>
+    <script src="/apps/common/utils.js" defer></script>
+    <script src="/apps/command-board/admin.js" defer></script>
+    <script src="/apps/command-board/reporting.js" defer></script>
+    <script src="/apps/command-board/command-board.js" defer></script>
+    <script src="/apps/command-board/super-admin.js" defer></script>
 
-    <!-- Main router script MUST be last, and is deferred. -->
-    <script src="apps/common/app.js" defer></script>
+    <!-- Main app script that initializes Firebase. Runs last among the deferred scripts. -->
+    <script src="/apps/common/app.js" defer></script>
 </body>
 </html>

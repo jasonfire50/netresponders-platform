@@ -35,12 +35,9 @@
     <!-- Firebase SDKs -->
     <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-app.js"></script>
     <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-auth.js"></script>
-
-    <!-- Centralized initializer MUST be first -->
-    <script src="apps/common/firebase-init.js"></script>
-
+    
     <!-- THE FIX: The defer attribute tells the browser to run this script only
          after the entire HTML document is fully parsed and ready. -->
-    <script src="apps/common/auth.js" defer></script>
+    <script src="/apps/common/auth.js" defer></script>
 </body>
 </html>

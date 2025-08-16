@@ -18,6 +18,20 @@ let appState = {
 
 function clearGroupSelectionState() { appState.selectedGroupUnits = {}; }
 
+// ===================================================================
+//
+//  ENVIRONMENT CONSTANTS
+//
+// ===================================================================
+const hostname = window.location.hostname;
+const isDevelopment = hostname.includes('netresponders-apps-dev--') || 
+                      hostname.includes('localhost') || 
+                      hostname.includes('127.0.0.1');
+
+const API_URL = isDevelopment 
+  ? "https://us-central1-netresponders-apps-dev.cloudfunctions.net/api"  // DEV URL
+  : "https://us-central1-netresponders-apps-50.cloudfunctions.net/api"; // PROD URL
+
 
 // ===================================================================
 //
@@ -30,53 +44,64 @@ document.addEventListener("DOMContentLoaded", () => {
   const loader = document.getElementById('loader');
   if (appContainer) appContainer.style.display = 'none';
   if (loader) loader.style.display = 'block';
-  // ---- START: NEW DYNAMIC CONFIG LOGIC ----
+  // --- START: NEW ROBUST DYNAMIC CONFIG LOGIC ---
 
-  // This function will fetch and initialize Firebase
   async function initializeFirebase() {
-    let configPath;
-    const hostname = window.location.hostname;
+    // Explicitly define the two possible paths
+    const devConfigPath = '/firebase-config-dev.js';
+    const prodConfigPath = '/firebase-config-prod.js';
+    let configToLoad;
 
-    // The 'idx.dev' check is specifically for the Firebase Studio preview window
-    if (hostname.includes('idx.dev') || hostname === 'localhost' || hostname === '127.0.0.1') {
+    if (isDevelopment) {
       console.log("Environment: DEVELOPMENT");
-      configPath = './firebase-config-dev.js';
+      configToLoad = devConfigPath;
     } else {
       console.log("Environment: PRODUCTION");
-      configPath = './firebase-config-prod.js';
+      configToLoad = prodConfigPath;
     }
 
     try {
-      // Dynamically import the config file
-      const configModule = await import(configPath);
+      console.log(`Attempting to load config from: ${configToLoad}`);
+      const configModule = await import(configToLoad);
       const firebaseConfig = configModule.firebaseConfig;
 
-      // Initialize Firebase with the loaded config
-      // This makes the global `firebase` object available to the rest of your app
+      if (!firebaseConfig) {
+        throw new Error("firebaseConfig object not found in the loaded module.");
+      }
+
       firebase.initializeApp(firebaseConfig);
       console.log("Firebase has been initialized successfully.");
+      
+      if (typeof initializeLoginForm === 'function') {
+        initializeLoginForm();
+      }
 
-      // Now that Firebase is ready, set up the authentication listener
-      setupAuthListener();
+      setupAuthListener(); // Proceed to the next step
 
     } catch (err) {
-      console.error("CRITICAL: Failed to load Firebase config or initialize app.", err);
-      // You could display a critical error message to the user here
+      console.error(`CRITICAL: Failed to load Firebase config from ${configToLoad}.`, err);
     }
   }
 
-  // This function contains your original onAuthStateChanged logic
   function setupAuthListener() {
     firebase.auth().onAuthStateChanged(user => {
       if (user) {
+        const currentPath = window.location.pathname;
+      
+        // If we are already logged in AND we are on the login page,
+        // just redirect to the main app without doing anything else.
+        if (currentPath.includes('/login.html')) {
+          window.location.href = '/command'; // Or your main app page
+          return; // Stop execution here
+        }
+      
+        // If we are on any other page, proceed with the full app initialization.
         if (isInitializing) return;
         isInitializing = true;
         if (appContainer) appContainer.style.display = 'block';
-        initializeApp(user); // Your original initializeApp function
+        initializeApp(user);
+      
       } else {
-        isInitializing = false;
-        if (appState.sessionHeartbeatInterval) clearInterval(appState.sessionHeartbeatInterval);
-        Object.assign(appState, { sessionId: null, currentUser: null, idToken: null, isLockedOut: false, isViewOnly: false });
         const currentPath = window.location.pathname;
         if (!currentPath.includes('/login.html')) {
           window.location.href = `/login.html?redirect=${currentPath}`;
@@ -88,9 +113,8 @@ document.addEventListener("DOMContentLoaded", () => {
   // Start the entire process
   initializeFirebase();
 
-  // ---- END: NEW DYNAMIC CONFIG LOGIC ----
+  // --- END: NEW ROBUST DYNAMIC CONFIG LOGIC ---
 });
-
 
 /**
  * Main application initializer - FINAL DEFINITIVE VERSION
@@ -99,17 +123,40 @@ document.addEventListener("DOMContentLoaded", () => {
  */
 async function initializeApp(user) {
   console.log(`App Version: ${APP_VERSION} loading...`);
-  const sessionId = sessionStorage.getItem('sessionId');
-  if (!sessionId) {
+  
+  // Session handling logic (This part is correct and remains)
+  const urlParams = new URLSearchParams(window.location.search);
+  const sessionIdFromUrl = urlParams.get('sessionId');
+  let currentSessionId = sessionStorage.getItem('sessionId');
+  if (sessionIdFromUrl) {
+    sessionStorage.setItem('sessionId', sessionIdFromUrl);
+    currentSessionId = sessionIdFromUrl;
+    window.history.replaceState({}, document.title, window.location.pathname);
+  }
+  if (!currentSessionId) {
     console.error("CRITICAL: No session ID found. Forcing logout.");
     await firebase.auth().signOut();
     return;
   }
+
   appState.isAuthenticated = true;
   appState.currentUser = user;
-  appState.sessionId = sessionId;
+  appState.sessionId = currentSessionId;
+
   try {
     appState.idToken = await user.getIdToken(true);
+
+    // --- START: CORRECTED LOGIC ---
+    // STEP 1: Fetch the user's Firestore document
+    const userDocRef = firebase.firestore().collection('users').doc(user.uid);
+    const userDoc = await userDocRef.get();
+    if (!userDoc.exists) {
+      throw new Error("User data not found in database.");
+    }
+    const userData = userDoc.data();
+    appState.isSuperAdmin = userData.isSuperAdmin === true;
+
+    // STEP 2: Check the session status
     const statusResponse = await callApi("checkSessionStatus", { sessionId: appState.sessionId }, 'POST');
     if (!statusResponse.success) throw new Error(statusResponse.message);
     if (statusResponse.data.status === 'locked_out') {
@@ -121,10 +168,15 @@ async function initializeApp(user) {
       hideLoader();
       return;
     }
+
+    // STEP 3: Fetch the rest of the initial application data (THIS WAS THE MISSING PIECE)
     const initialDataResponse = await callApi("getInitialData");
     if (!initialDataResponse.success) throw new Error(initialDataResponse.message);
     appState.initialData = initialDataResponse.data;
     appState.planLevel = initialDataResponse.data.planLevel || 'Basic';
+    // --- END: CORRECTED LOGIC ---
+
+    // Now that ALL data is loaded, render the app
     renderApp();
     setupGlobalEventListeners();
     manageHeartbeat();
@@ -132,6 +184,7 @@ async function initializeApp(user) {
     const authStatus = document.getElementById("auth-status");
     if (authStatus) authStatus.textContent = `Authenticated: ${user.email}`;
     showView("commandBoardView");
+
   } catch (error) {
     console.error("CRITICAL INITIALIZATION FAILED:", error);
     await firebase.auth().signOut();
@@ -181,8 +234,7 @@ async function manageHeartbeat() {
 function renderApp() {
   const appContainer = document.getElementById("app-container");
   if (!appContainer) return;
-  const SUPER_ADMIN_UID = "WRikDrCVOqTbXHK11mteAD9Fr4t1";
-  const isSuperAdmin = appState.currentUser.uid === SUPER_ADMIN_UID;
+  const isSuperAdmin = appState.isSuperAdmin;
   const superAdminTabHtml = isSuperAdmin ? `<li class="nav-item"><a class="nav-link" data-view="superAdminView" href="#"><i class="fas fa-user-shield"></i> Super Admin</a></li>` : '';
   appContainer.innerHTML = `
     <div class="d-flex align-items-center mb-2">
@@ -342,9 +394,8 @@ function showView(viewId) {
  * A secure, centralized function for making all API calls.
  */
 async function callApi(action, params = {}, method = 'GET') {
-  const API_URL = "https://us-central1-netresponders-apps-50.cloudfunctions.net/api";
+  
   const url = new URL(API_URL);
-
   const headers = {
     'Authorization': `Bearer ${appState.idToken}`,
     'Content-Type': 'application/json'

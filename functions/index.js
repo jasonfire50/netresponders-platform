@@ -59,6 +59,7 @@ async function getAuthContextFromIdToken(req) {
       customerId: userData.customerId,
       planLevel: userData.planLevel || "Basic",
       name: userData.name || "Unknown User",
+      isSuperAdmin: userData.isSuperAdmin === true, // <-- ADD THIS LINE
     };
   } catch (error) {
     console.error("Error while verifying ID token:", error);
@@ -2961,17 +2962,13 @@ async function deleteIncident(query, authContext) {
 //
 // ===================================================================
 
-// Replace this with YOUR actual Firebase Auth UID.
-// You can find this in the Firebase Console -> Authentication -> Users table.
-const SUPER_ADMIN_UID = "WRikDrCVOqTbXHK11mteAD9Fr4t1";
-
 /**
  * A secure helper to verify that the caller is the designated Super Admin.
  * @param {object} authContext The context object from a callable function.
  * @throws {Error} If the caller is not the Super Admin.
  */
 function verifySuperAdmin(authContext) {
-  if (!authContext || authContext.uid !== SUPER_ADMIN_UID) {
+  if (authContext.isSuperAdmin !== true) { // <-- This is correct
     const errorMsg =
       "You must be a Super Admin to perform this action.";
     throw new functions.https.HttpsError(
